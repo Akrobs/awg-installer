@@ -675,7 +675,7 @@ graph TD
 Инсталлятор скачивает `awg_common.sh` и `manage_amneziawg.sh` с URL, привязанных к конкретному тегу версии:
 
 ```
-https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.22.0/awg_common.sh
+https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.23.0/awg_common.sh
 ```
 
 Это даёт **supply chain pinning**: скачиваемые скрипты соответствуют версии инсталлятора, даже если `main` уже обновлён.
@@ -695,12 +695,12 @@ AWG_BRANCH=my-feature-branch sudo bash ./install_amneziawg.sh
 
 ```bash
 # Русская версия:
-wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.22.0/manage_amneziawg.sh
-wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.22.0/awg_common.sh
+wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.23.0/manage_amneziawg.sh
+wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.23.0/awg_common.sh
 
 # Английская версия:
-wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.22.0/manage_amneziawg_en.sh
-wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.22.0/awg_common_en.sh
+wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.23.0/manage_amneziawg_en.sh
+wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.23.0/awg_common_en.sh
 
 # Установить права
 chmod 700 /root/awg/manage_amneziawg.sh /root/awg/awg_common.sh
@@ -1350,6 +1350,14 @@ apt-get update && apt-get install -y curl
 **Ожидаемые предупреждения:**
 
 При установке на Debian вы можете увидеть предупреждение `sudo removal refused` — это нормально, так как Debian использует `sudo` как системный пакет и скрипт корректно пропускает его удаление.
+
+### AmneziaWG 3.0 и ядра старше 6.7 (Debian 12) - v5.23.0
+
+В конце июля 2026 команда Amnezia выпустила **AmneziaWG 3.0** и переключила на него PPA `ppa:amnezia/ppa`. Модуль ядра 3.0 использует функцию `nla_put_uint`, которая появилась только в ядре Linux 6.7, поэтому на **Debian 12 (bookworm) с ядром 6.1** сборка 3.0-модуля из PPA не проходит (`implicit declaration of function 'nla_put_uint'`).
+
+Начиная с **v5.23.0** инсталлятор это учитывает автоматически: если версия ядра старше 6.7, он не берёт модуль из PPA, а собирает через DKMS **закреплённый последний модуль AmneziaWG 2.0** (тег `v1.0.20260725`, сверяется по commit-хэшу) из исходников. Утилиты `amneziawg-tools` по-прежнему ставятся из PPA - версия 3.0 определяет поколение протокола у модуля и корректно работает с 2.0. Ставить что-либо вручную не нужно, всё происходит на шаге 2. На ядрах 6.7 и новее (Ubuntu 24.04/25.10/26.04, Debian 13 trixie) поведение прежнее - модуль ставится из PPA.
+
+Если хотите получить именно AmneziaWG 3.0 на Debian 12, обновите ядро до 6.7+ из `bookworm-backports` и переустановите (`--force`), либо разверните сервер на Debian 13 / Ubuntu 24.04+. Поддержка самих возможностей 3.0 (header protection, рандомизация таймингов) в инсталляторе планируется отдельно и появится, когда стек 3.0 и клиентские приложения стабилизируются.
 
 ---
 

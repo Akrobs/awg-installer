@@ -8,7 +8,7 @@ fi
 # ==============================================================================
 # Скрипт для установки и настройки AmneziaWG 2.0 на Ubuntu/Debian серверах
 # Автор: @bivlked
-# Версия: 5.22.0
+# Версия: 5.23.0
 # Дата: 2026-07-31
 # Репозиторий: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
@@ -16,7 +16,7 @@ fi
 # --- Безопасный режим и Константы ---
 set -o pipefail
 
-SCRIPT_VERSION="5.22.0"
+SCRIPT_VERSION="5.23.0"
 AWG_DIR="/root/awg"
 CONFIG_FILE="$AWG_DIR/awgsetup_cfg.init"
 STATE_FILE="$AWG_DIR/setup_state"
@@ -33,8 +33,17 @@ MANAGE_SCRIPT_PATH="$AWG_DIR/manage_amneziawg.sh"
 # Проверяются в step5_download_scripts() после curl.
 # Если AWG_BRANCH переопределён (не v$SCRIPT_VERSION), проверка пропускается.
 # Формат: sha256sum output (hex, 64 chars).
-COMMON_SCRIPT_SHA256="c6ce7ca8031dc891fadfc7655584b1828426c0e094eba31927b133fb57a06181"
-MANAGE_SCRIPT_SHA256="39752f29636981383011fdd8a5e66f6eaa5ffeae554f726ea058175d085869ad"
+COMMON_SCRIPT_SHA256="26ae997ffbc8c98eafa4f4846d66f8fe1aa3a4698bd079dea6cc045a9f608a12"
+MANAGE_SCRIPT_SHA256="ab580a06d0c5bdf017befad4379d15dcf7eb89e1718a4f9625781e7bb3e1b1c8"
+
+# AmneziaWG 2.0 пин (H0, 31 jul 2026). Upstream влил AmneziaWG 3.0 в default-ветку
+# amneziawg-linux-kernel-module и PPA переключился на 3.0. 3.0-модуль требует ядро
+# >= 6.7 (nla_put_uint), поэтому на старых ядрах (Debian 12 = 6.1) DKMS-сборка из
+# PPA падает. На таких ядрах ставим ПИНОВЫЙ последний 2.0-модуль (линия 1.0.x) из
+# исходника. AWG2_PIN_COMMIT сверяется после clone (integrity: надёжнее хрупкого
+# tarball-SHA - тег теоретически можно переместить, immutable-коммит нельзя).
+AWG2_PIN_TAG="v1.0.20260725"
+AWG2_PIN_COMMIT="ae0924ca700520ca34c5bdbcfd05b2f683ea9353"
 
 # Флаги CLI
 UNINSTALL=0; HELP=0; HELP_EXIT_RC=0; DIAGNOSTIC=0; VERBOSE=0; NO_COLOR=0; AUTO_YES=0; NO_TWEAKS=0; NO_CPS=0
@@ -482,6 +491,30 @@ check_kernel_version() {
     else
         log "Ядро $kver (OK для модуля AmneziaWG 2.0)."
     fi
+}
+
+# shellcheck disable=SC2120  # в установщике зовётся без аргументов (берёт uname -r); bats передаёт версии
+_kernel_supports_awg3() {
+    # Возвращает 0, если версия ядра >= 6.7 - то есть ядро способно собрать
+    # AmneziaWG 3.0-модуль. Возвращает 1, если ядро старее 6.7 (нужен пиновый
+    # 2.0-модуль). Порог 6.7: функция nla_put_uint, которую использует 3.0-код,
+    # впервые появилась в mainline-ядре v6.7 (в 6.6 её нет); на 6.1 (Debian 12)
+    # сборка 3.0-модуля падает с 'implicit declaration of nla_put_uint'.
+    # Arg $1: kernel release (default uname -r). Неразбираемую версию считаем
+    # "НЕ поддерживает" -> пиновый 2.0 (он собирается на ЛЮБОМ нашем ядре, так что
+    # консервативный выбор не ломает связь, лишь не даёт 3.0-фич, которых в H0 нет).
+    # Чистая функция без внешних зависимостей (bats: извлекается sed-range + source).
+    local kver="${1:-$(uname -r)}" kmaj kmin
+    local min_maj=6 min_min=7
+    if [[ "$kver" =~ ^([0-9]+)\.([0-9]+) ]]; then
+        kmaj=${BASH_REMATCH[1]}; kmin=${BASH_REMATCH[2]}
+    else
+        return 1
+    fi
+    if (( kmaj > min_maj || (kmaj == min_maj && kmin >= min_min) )); then
+        return 0
+    fi
+    return 1
 }
 
 check_free_space() {
@@ -2160,6 +2193,18 @@ step_uninstall() {
         log "Пропуск UFW/Fail2Ban (установка с --no-tweaks)."
     fi
     log "Удаление пакетов..."
+    # Снять hold с PPA-пакетов (ставился на пиновом пути H0) ДО удаления PPA:
+    # `apt-mark unhold` требует installed- или candidate-версию, а после удаления
+    # PPA (ниже) кандидат исчезает и apt-mark падает 'Can't select ... version',
+    # оставляя hold в dpkg-selection -> блокирует будущую переустановку. dpkg-
+    # fallback чистит selection напрямую, если PPA уже убран прошлым прогоном.
+    local _hp
+    for _hp in amneziawg amneziawg-dkms; do
+        apt-mark unhold "$_hp" >/dev/null 2>&1 || true
+        if dpkg --get-selections "$_hp" 2>/dev/null | grep -q '[[:space:]]hold$'; then
+            echo "$_hp deinstall" | dpkg --set-selections >/dev/null 2>&1 || true
+        fi
+    done
     if [[ "$saved_no_tweaks" -eq 0 ]]; then
         local _purge_pkgs=(amneziawg-dkms amneziawg-tools qrencode)
         # fail2ban purge-им только если сами его доустановили (маркер из
@@ -2203,7 +2248,22 @@ step_uninstall() {
         fi
     fi
     log "Удаление DKMS..."
-    rm -rf /var/lib/dkms/amneziawg* || log_warn "Ошибка удаления DKMS."
+    # Корректно снять DKMS-регистрацию (для всех версий amneziawg/*) и убрать
+    # исходник в /usr/src, а не только состояние в /var/lib/dkms. Hold с PPA-
+    # пакетов снят выше (до удаления PPA). `dkms status`: 'amneziawg/1.0.0, <kern>...'.
+    if command -v dkms >/dev/null 2>&1; then
+        local _dv
+        while IFS= read -r _dv; do
+            [[ -n "$_dv" ]] || continue
+            if ! dkms remove -m amneziawg -v "$_dv" --all >/dev/null 2>&1; then
+                log_warn "dkms remove amneziawg/$_dv не удался - дочищаю файлы вручную."
+            fi
+        done < <(dkms status 2>/dev/null | awk -F'[,/ ]+' '/^amneziawg[,/]/{print $2}' | sort -u)
+    fi
+    rm -rf /var/lib/dkms/amneziawg* /usr/src/amneziawg-* || log_warn "Ошибка удаления DKMS."
+    # Подчистить возможно оставшийся собранный .ko (если dkms remove не отработал) + depmod.
+    find /lib/modules -name 'amneziawg.ko*' -path '*/updates/dkms/*' -delete 2>/dev/null || true
+    command -v depmod >/dev/null 2>&1 && depmod -a >/dev/null 2>&1 || true
     log "Восстановление sysctl..."
     # Только точные строки, которые писали legacy-версии нашего инсталлятора
     # (=1 для all/default/lo). Раньше удалялась ЛЮБАЯ строка с disable_ipv6 -
@@ -2764,6 +2824,90 @@ _try_install_prebuilt_arm() {
     fi
 }
 
+# H0 (AWG 3.0, 31 jul 2026): на ядрах < 6.7 актуальный PPA-модуль = AmneziaWG 3.0,
+# который не собирается (nla_put_uint появился только в ядре 6.7). Устанавливаем
+# ПИНОВЫЙ последний 2.0-модуль (линия 1.0.x) из исходника через DKMS:
+#   1. git clone пинового тега --depth=1;
+#   2. СВЕРКА commit с AWG2_PIN_COMMIT (integrity: immutable-коммит надёжнее, чем
+#      SHA авто-tarball GitHub, который меняется при смене компрессии);
+#   3. upstream-механизм `make dkms-install` (кладёт в /usr/src/amneziawg-1.0.0);
+#   4. dkms add/build/install под текущее ядро;
+#   5. modprobe-проверка (собран != загружаем: Secure Boot может блокировать).
+# dkms.conf исходника несёт AUTOINSTALL=yes, поэтому наш helper amneziawg-ensure-
+# module (apt-hook + systemd) пересоберёт пиновый модуль при апгрейде ядра сам -
+# отдельный maintenance-код не нужен. Возврат: 0 успех, 1 провал (лог в ERROR).
+_install_pinned_awg2_module() {
+    local repo="https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git"
+    local kver work got_commit
+    local dkms_ver="1.0.0"   # WIREGUARD_VERSION в upstream Makefile (имя /usr/src/amneziawg-<ver>)
+    kver="$(uname -r)"
+
+    if ! command -v git >/dev/null 2>&1; then
+        log_error "git не установлен - невозможно получить пиновый исходник модуля."
+        return 1
+    fi
+
+    work="$(mktemp -d /tmp/awg2-pin-XXXXXX)" || { log_error "mktemp -d не удался."; return 1; }
+
+    log "Клонирование пинового исходника AmneziaWG 2.0 ($AWG2_PIN_TAG)..."
+    if ! git clone --depth=1 --branch "$AWG2_PIN_TAG" "$repo" "$work/src" >/dev/null 2>&1; then
+        log_error "Не удалось клонировать $repo (тег $AWG2_PIN_TAG). Проверьте доступ к github.com."
+        rm -rf "$work"; return 1
+    fi
+
+    got_commit="$(git -C "$work/src" rev-parse HEAD 2>/dev/null || echo "")"
+    if [[ "$got_commit" != "$AWG2_PIN_COMMIT" ]]; then
+        log_error "Пин-проверка не пройдена: тег $AWG2_PIN_TAG -> commit '${got_commit:-<пусто>}',"
+        log_error "ожидался $AWG2_PIN_COMMIT. Отказ (возможна подмена/перемещение тега)."
+        rm -rf "$work"; return 1
+    fi
+    log "Пин-коммит подтверждён: $got_commit"
+
+    # Разложить DKMS-исходник upstream-механизмом (Makefile лежит в src/ подпапке).
+    # Вывод make сохраняем в лог: реальную причину сбоя (окружение/coreutils) иначе
+    # не увидеть - в отличие от dkms build, тут make.log не создаётся.
+    local _mklog="/var/log/amneziawg-pin-dkms-install.log"
+    if ! make -C "$work/src/src" dkms-install PREFIX=/usr >"$_mklog" 2>&1; then
+        log_error "make dkms-install не удался. Подробности: $_mklog"
+        rm -rf "$work"; return 1
+    fi
+    rm -rf "$work"
+
+    if [[ ! -f "/usr/src/amneziawg-${dkms_ver}/dkms.conf" ]]; then
+        log_error "/usr/src/amneziawg-${dkms_ver}/dkms.conf не появился после dkms-install."
+        return 1
+    fi
+
+    # add идемпотентен: при повторном запуске уже добавлен -> не фатально.
+    dkms add -m amneziawg -v "$dkms_ver" >/dev/null 2>&1 || true
+    # Идемпотентность (установщик - возобновляемая машина состояний): dkms build на
+    # уже собранном ядре возвращает ошибку "already built" -> собираем ТОЛЬКО если
+    # для этого ядра сборки ещё нет. install --force ниже идемпотентен сам по себе.
+    if dkms status -m amneziawg -v "$dkms_ver" -k "$kver" 2>/dev/null | grep -qE ': (built|installed)'; then
+        log "Пиновый 2.0-модуль уже собран для ядра $kver - пропускаю dkms build."
+    else
+        log "Сборка пинового 2.0-модуля через DKMS (ядро $kver)..."
+        if ! dkms build -m amneziawg -v "$dkms_ver" -k "$kver" >/dev/null 2>&1; then
+            log_error "DKMS build пинового 2.0-модуля не удался. Смотрите /var/lib/dkms/amneziawg/${dkms_ver}/${kver}/*/log/make.log"
+            return 1
+        fi
+    fi
+    if ! dkms install -m amneziawg -v "$dkms_ver" -k "$kver" --force >/dev/null 2>&1; then
+        log_error "DKMS install пинового 2.0-модуля не удался."
+        return 1
+    fi
+
+    # Собран != загружаем: при включённом Secure Boot неподписанный модуль не грузится.
+    if ! modprobe amneziawg 2>/dev/null; then
+        log_error "Модуль собран, но modprobe amneziawg не загрузил его."
+        log_error "Вероятная причина - Secure Boot: неподписанный DKMS-модуль блокируется."
+        log_error "Отключите Secure Boot в BIOS/UEFI VPS либо зарегистрируйте MOK-ключ."
+        return 1
+    fi
+    log "Пиновый AmneziaWG 2.0-модуль собран и загружен (DKMS $dkms_ver, ядро $kver)."
+    return 0
+}
+
 # ==============================================================================
 # ШАГ 2: Установка AmneziaWG и зависимостей
 # ==============================================================================
@@ -2986,8 +3130,56 @@ PPASRC
     # Пакеты AmneziaWG + qrencode (БЕЗ Python!)
     log "Установка пакетов AmneziaWG..."
 
+    # H0 (AWG 3.0, 31 jul 2026): путь пинового 2.0-модуля определяем ДО любой
+    # установки пакетов - hold обязан стоять раньше даже ARM-пути с предсобранным
+    # .deb, где install_packages ставит amneziawg-tools, чьи Recommends иначе
+    # подтянут несовместимый 3.0-модуль. На ядрах < 6.7 PPA-модуль = AmneziaWG 3.0
+    # (не собирается: nla_put_uint), поэтому его не ставим, а собираем пиновый 2.0
+    # из исходника; из PPA берём только tools (version-aware, совместимы с 2.0).
+    local use_pinned_awg2=0
+    if ! _kernel_supports_awg3; then
+        use_pinned_awg2=1
+        log "Ядро $(uname -r) старее 6.7 - PPA-модуль (AmneziaWG 3.0) здесь не соберётся."
+        log "Активирован путь пинового AmneziaWG 2.0-модуля из исходника ($AWG2_PIN_TAG)."
+        # Re-entry: если прошлый прогон/стоковый установщик успел поставить (или
+        # оставить полу-настроенным) 3.0-пакет - убрать его и его исходник, иначе
+        # его failing postinst и владение /usr/src/amneziawg-* конфликтуют со сборкой.
+        if dpkg -l amneziawg-dkms 2>/dev/null | grep -qE '^(ii|iU|iF|iH|rc)'; then
+            log "Обнаружен ранее установленный amneziawg-dkms (AmneziaWG 3.0) - удаляю перед пиновой сборкой."
+            DEBIAN_FRONTEND=noninteractive apt-get purge -y amneziawg-dkms amneziawg >/dev/null 2>&1 \
+                || dpkg --purge --force-all amneziawg-dkms amneziawg >/dev/null 2>&1 \
+                || log_warn "Не удалось полностью удалить ранее установленный amneziawg-dkms - установка ниже может упасть."
+            command -v dkms >/dev/null 2>&1 && dkms remove -m amneziawg -v 1.0.0 --all >/dev/null 2>&1 || true
+            rm -rf /var/lib/dkms/amneziawg* /usr/src/amneziawg-* 2>/dev/null || true
+        fi
+        # ⚠️ Hold ДО любой установки: amneziawg-tools РЕКОМЕНДУЕТ amneziawg-dkms, apt
+        # по умолчанию ставит recommends -> без hold установка tools (в т.ч. на ARM-
+        # пути) подтянула бы 3.0-dkms и упала на его сборке. Это защитный механизм,
+        # поэтому провал фатален (проверяем, что hold реально встал).
+        apt-mark hold amneziawg-dkms amneziawg >/dev/null 2>&1 || true
+        # Проверяем именно amneziawg-dkms - это несущий пакет: его РЕКОМЕНДУЕТ
+        # amneziawg-tools и он несёт 3.0-модуль. Метапакет amneziawg держать не
+        # обязательно (его Depends: amneziawg-dkms всё равно held), поэтому его
+        # отдельно не верифицируем.
+        if ! apt-mark showhold 2>/dev/null | grep -qx "amneziawg-dkms"; then
+            die "Не удалось зафиксировать amneziawg-dkms в hold. Без этого установка amneziawg-tools подтянет несовместимый AmneziaWG 3.0-модуль. Прервано (проверьте apt/dpkg lock)."
+        fi
+    else
+        # Ядро >= 6.7: нормальный путь ставит amneziawg-dkms из PPA. Снять возможный
+        # hold от прежнего пинового прогона (иначе apt install -y прервётся на held).
+        apt-mark unhold amneziawg-dkms amneziawg >/dev/null 2>&1 || true
+    fi
+
     # На ARM: сначала пробуем предсобранный .deb (не требует build-tools и headers).
     # Откат на DKMS если совпадения нет или скачивание не удалось.
+    # ⚠️ На ядре < 6.7 (use_pinned_awg2=1) предсобранный .deb использовать БЕЗОПАСНО:
+    # наши ARM-пребилты собираются из scripts/arm-module-version.txt, запиненного на
+    # тот же 2.0-тег (v1.0.20260725) и залоченного тестом, то есть это ЗАВЕДОМО 2.0-
+    # модуль, а не 3.0. Плюс 3.0 физически не компилируется под ядро < 6.7, поэтому
+    # 3.0-ассета для таких целей (напр. debian-bookworm-arm64) в релизе существовать
+    # не может - при отсутствии совпадения _try_install_prebuilt_arm вернёт 1 и мы
+    # уйдём в проверяемую сборку из исходника ниже. hold, выставленный выше, здесь
+    # тоже в силе (не даёт tools подтянуть 3.0-dkms через Recommends).
     local arch
     arch="$(uname -m)"
     if [[ "$arch" == "aarch64" || "$arch" == "armv7l" ]]; then
@@ -3001,8 +3193,17 @@ PPASRC
         log "Совпадений не найдено — откат на DKMS."
     fi
 
-    local packages=("amneziawg-dkms" "amneziawg-tools" "wireguard-tools" "dkms"
-                    "build-essential" "dpkg-dev" "qrencode")
+    # Пакеты: на пиновом пути (ядро < 6.7) amneziawg-dkms НЕ ставим (это был бы
+    # 3.0-модуль), вместо него git для сборки пинового 2.0-исходника. Гейт, hold и
+    # очистка ранее установленного 3.0 выполнены выше (до ARM-блока).
+    local packages
+    if [[ "$use_pinned_awg2" -eq 1 ]]; then
+        packages=("amneziawg-tools" "wireguard-tools" "dkms"
+                  "build-essential" "dpkg-dev" "git" "qrencode")
+    else
+        packages=("amneziawg-dkms" "amneziawg-tools" "wireguard-tools" "dkms"
+                  "build-essential" "dpkg-dev" "qrencode")
+    fi
 
     # Linux headers: на Debian может не быть точного linux-headers-$(uname -r)
     local current_headers
@@ -3062,6 +3263,20 @@ PPASRC
         fi
     fi
     install_packages "${packages[@]}"
+
+    # H0: пиновый путь - собрать 2.0-модуль из исходника ВМЕСТО PPA-amneziawg-dkms.
+    # Headers текущего ядра уже установлены выше (в packages); hold выставлен ранее.
+    if [[ "$use_pinned_awg2" -eq 1 ]]; then
+        if ! _install_pinned_awg2_module; then
+            log_error "Не удалось установить пиновый AmneziaWG 2.0-модуль."
+            log_error "Ядро $(uname -r) старее 6.7, а актуальный PPA-модуль - AmneziaWG 3.0,"
+            log_error "который на этом ядре не собирается. Варианты: обновить ядро до 6.7+"
+            log_error "(на Debian 12 - через bookworm-backports) либо переустановить VPS на"
+            log_error "Ubuntu 24.04/25.10 или Debian 13. Подробнее: см. README/INSTALL_VPS."
+            die "Пиновый AmneziaWG 2.0-модуль не установлен."
+        fi
+        log "Пиновый AmneziaWG 2.0-модуль установлен; PPA-dkms в hold (защита от 3.0)."
+    fi
 
     # v5.12.0: мета-пакет linux-headers, чтобы apt автоматически подтягивал
     # заголовки при kernel upgrade. Без меты ставится только
