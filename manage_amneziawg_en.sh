@@ -8,14 +8,14 @@ fi
 # ==============================================================================
 # AmneziaWG 2.0 peer management script
 # Author: @bivlked
-# Version: 5.21.2
-# Date: 2026-07-22
+# Version: 5.22.0
+# Date: 2026-07-31
 # Repository: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
 # --- Safe mode and Constants ---
 # shellcheck disable=SC2034
-SCRIPT_VERSION="5.21.2"
+SCRIPT_VERSION="5.22.0"
 set -o pipefail
 AWG_DIR="/root/awg"
 SERVER_CONF_FILE="/etc/amnezia/amneziawg/awg0.conf"
@@ -2136,6 +2136,9 @@ case $COMMAND in
 
     regen)
         log "Regenerating config and QR files..."
+        # Editing AWG_* in awgsetup_cfg.init after the install does not reach
+        # clients (awg0.conf is the source of truth). That used to be silent (#196).
+        warn_awg_init_drift
         # --reset-routes (Issue #170): pass the flag to regenerate_client via
         # ENV - a regular regen preserves per-client AllowedIPs, with the flag
         # every client gets the global routing mode from awgsetup_cfg.init.
@@ -2252,6 +2255,7 @@ case $COMMAND in
         ;;
 
     check|status)
+        warn_awg_init_drift
         check_server || _cmd_rc=1
         ;;
 

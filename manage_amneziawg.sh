@@ -8,14 +8,14 @@ fi
 # ==============================================================================
 # Скрипт для управления пользователями (пирами) AmneziaWG 2.0
 # Автор: @bivlked
-# Версия: 5.21.2
-# Дата: 2026-07-22
+# Версия: 5.22.0
+# Дата: 2026-07-31
 # Репозиторий: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
 # --- Безопасный режим и Константы ---
 # shellcheck disable=SC2034
-SCRIPT_VERSION="5.21.2"
+SCRIPT_VERSION="5.22.0"
 set -o pipefail
 AWG_DIR="/root/awg"
 SERVER_CONF_FILE="/etc/amnezia/amneziawg/awg0.conf"
@@ -2122,6 +2122,9 @@ case $COMMAND in
 
     regen)
         log "Перегенерация файлов конфигурации и QR..."
+        # Правка AWG_* в awgsetup_cfg.init после установки на клиентов не влияет
+        # (источник истины - awg0.conf). Раньше это проходило молча (#196).
+        warn_awg_init_drift
         # --reset-routes (Issue #170): передаём флаг в regenerate_client через
         # ENV - обычный regen сохраняет индивидуальные AllowedIPs клиентов, с
         # флагом ставит всем глобальный режим из awgsetup_cfg.init.
@@ -2238,6 +2241,7 @@ case $COMMAND in
         ;;
 
     check|status)
+        warn_awg_init_drift
         check_server || _cmd_rc=1
         ;;
 
