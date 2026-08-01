@@ -610,8 +610,12 @@ For selectively routing the Russian segment through Cloudflare WARP via a BGP fe
 </details>
 
 <details>
-  <summary><strong>Q: Is it safe to re-run the installer?</strong></summary>
-  <b>A:</b> Yes. Re-running over an already working service requires the <code>--force</code> flag (or <code>AWG_FORCE_REINSTALL=1</code>) - without it the script reports that AmneziaWG is already installed and changes nothing. With <code>--force</code> the server config is recreated, but existing clients are automatically restored from backup: default clients (<code>my_phone</code>, <code>my_laptop</code>) are recreated; all others are preserved.
+  <summary><strong>Q: Is it safe to re-run the installer? Will clients need new configs?</strong></summary>
+  <b>A:</b> Yes, it is safe, and no re-issuing is needed. Re-running over an already working service requires the <code>--force</code> flag (or <code>AWG_FORCE_REINSTALL=1</code>) - without it the script reports that AmneziaWG is already installed and changes nothing. With <code>--force</code> the server config is written anew, but the server keys and the obfuscation parameters are taken from the existing setup, and the <code>[Peer]</code> blocks are carried over from the previous config. Every client is preserved, including the default <code>my_phone</code> and <code>my_laptop</code>: the creation loop skips the ones already present in the config. Config files and QR codes handed out earlier stay valid.
+  <br><br>
+  There is exactly one exception: passing <code>--preset</code>, <code>--jc</code>, <code>--jmin</code> or <code>--jmax</code> regenerates the whole <code>Jc</code>/<code>S</code>/<code>H</code>/<code>I1</code> set, and then the old configs do stop connecting - they have to be re-issued with <code>regen</code> and handed out again. Leave those flags off for a plain update.
+  <br><br>
+  Most of the time <code>--force</code> is not needed at all: to get the newer management commands it is enough to update the two scripts on the server (see the question above). Re-running the installer itself is only worth it when the installer changed.
 </details>
 
 > More answers and solutions in **[ADVANCED.en.md](ADVANCED.en.md)**.

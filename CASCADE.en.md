@@ -421,6 +421,7 @@ One thing to expect: with `RemainAfterExit=no`, `systemctl status awg-routing` s
 - The scheme works over IPv4. Keep IPv6 disabled (the installer does so by default), otherwise IPv6 traffic would bypass the split.
 - No separate MTU tuning is needed: the double encapsulation fits within the standard size, and large transfers go through without loss.
 - The client's DNS queries go through the foreign exit - this does not affect operation and creates no leak.
+- Reinstalling with `--force` does not break the cascade: its logic lives in `/root/awg/awg-routing.sh` and the `awg-routing` unit, not in `awg0.conf`. Step 7 does restart `awg-quick@awg0` though, and step 4 re-applies the UFW rules, so run `bash /root/awg/awg-routing.sh` once more afterwards (that is why it is idempotent) and check `ip rule`. Any UFW rules you added by hand are worth re-checking at the same time.
 
 ---
 

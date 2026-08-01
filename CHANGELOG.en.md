@@ -12,6 +12,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+
+- **Answer to "how do I update without redoing everyone's connections"** ([#201](https://github.com/bivlked/amneziawg-installer/discussions/201)). The FAQ in both READMEs, the update section of `INSTALL_VPS.md` and the limitations list in `CASCADE.md`/`CASCADE.en.md` now say it outright: with `--force` the server keys, the `[Peer]` blocks and the obfuscation parameters are taken from the existing setup, so configs and QR codes handed out earlier stay valid and every client is preserved, defaults included. The single exception is `--preset`/`--jc`/`--jmin`/`--jmax`, which regenerate the whole `Jc`/`S`/`H`/`I1` set and do force a re-issue via `regen`. For the cascade it is now stated that its logic lives in `awg-routing.sh` and survives a reinstall, but the routing script has to be run once more afterwards
+- **Fixed a wrong line in the FAQ of both READMEs**: it claimed that re-running the installer recreates the default `my_phone` and `my_laptop` clients. That described long-gone behaviour - the creation loop skips clients already present in the config and re-issues nothing
+
 ### Changed
 
 - **Installer messages about the pinned 2.0 module no longer call the 3.0 build impossible.** On 31 July upstream fixed `nla_put_uint` ([issue #204](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module/issues/204), version `v3.0.20260731-04`), and the PPA 3.0 module now builds on Debian 12 as well - verified on kernel 6.1.0-51. The 6.7 threshold in the installer is unchanged, but the reasoning behind it is different: on older kernels we deliberately keep the module we have tested rather than route around one that cannot build. Messages in both installers, the code comments, `ADVANCED.md`/`ADVANCED.en.md`, `INSTALL_VPS.md` and the ARM build pin are brought in line, and the v5.23.0 entry is marked as describing release day. Install behaviour is unchanged
