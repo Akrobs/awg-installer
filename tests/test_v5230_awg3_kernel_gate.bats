@@ -1,11 +1,13 @@
 #!/usr/bin/env bats
 # v5.23.0 (H0, AmneziaWG 3.0): predicate _kernel_supports_awg3.
 #
-# Upstream merged AmneziaWG 3.0; the 3.0 module needs kernel >= 6.7 (nla_put_uint).
-# On older kernels the installer must route to the pinned 2.0 path. This test pins
-# the 6.7 boundary and the parsing of real uname -r strings from our support matrix,
-# so moving the threshold is a deliberate edit that updates this test, not a silent
-# one.
+# Upstream merged AmneziaWG 3.0, and on kernels older than 6.7 the installer routes
+# to the pinned 2.0 path instead. The threshold originally came from a build failure
+# (nla_put_uint, absent before kernel 6.7); upstream fixed that on 31 jul 2026 in
+# v3.0.20260731-04, so the threshold is now a deliberate conservatism boundary - see
+# the comment on _kernel_supports_awg3 in the installer. This test pins the 6.7
+# boundary and the parsing of real uname -r strings from our support matrix, so
+# moving the threshold is a deliberate edit that updates this test, not a silent one.
 #
 # The function is pure and self-contained - extracted via sed-range and sourced
 # (same pattern as apt_update_tolerant in test_apt_tolerant.bats). Descriptions are

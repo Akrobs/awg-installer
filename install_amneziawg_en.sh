@@ -37,12 +37,14 @@ COMMON_SCRIPT_SHA256="e831af6b26361eedd46d2786d2b9a3a6dc66401c92c10526347807c026
 MANAGE_SCRIPT_SHA256="68e8dce4c826d55ee4e4b566bec38ad6002877414ed4de695e7689829b7f7bea"
 
 # AmneziaWG 2.0 pin (H0, 31 jul 2026). Upstream merged AmneziaWG 3.0 into the
-# amneziawg-linux-kernel-module default branch and the PPA switched to it. The 3.0
-# module needs kernel >= 6.7 (nla_put_uint), so on older kernels (Debian 12 = 6.1)
-# the PPA DKMS build fails. On such kernels we build the last pinned 2.0 module
-# (the 1.0.x line) from source. AWG2_PIN_COMMIT is checked after clone (integrity:
-# more robust than a fragile tarball SHA - a tag can be moved, an immutable commit
-# cannot).
+# amneziawg-linux-kernel-module default branch, and the PPA switched to it. Back
+# then the PPA DKMS build failed on nla_put_uint on kernels older than 6.7
+# (Debian 12 = 6.1). Upstream fixed that the same evening on 31 jul
+# (v3.0.20260731-04; verified by us on Debian 12 / 6.1.0-51 on 1 aug), so the pin
+# went from FORCED to DELIBERATE: on older kernels we keep the module we have
+# tested until 3.0 is validated separately. AWG2_PIN_COMMIT is checked after clone
+# (integrity: more robust than a fragile tarball SHA - a tag can be moved, an
+# immutable commit cannot).
 AWG2_PIN_TAG="v1.0.20260725"
 AWG2_PIN_COMMIT="ae0924ca700520ca34c5bdbcfd05b2f683ea9353"
 
@@ -501,11 +503,18 @@ check_kernel_version() {
 
 # shellcheck disable=SC2120  # called without args in the installer (uses uname -r); bats passes versions
 _kernel_supports_awg3() {
-    # Returns 0 if the kernel version is >= 6.7 - i.e. the kernel can build the
-    # AmneziaWG 3.0 module. Returns 1 if the kernel is older than 6.7 (a pinned
-    # 2.0 module is needed). Threshold 6.7: nla_put_uint, which the 3.0 code uses,
-    # first appeared in mainline kernel v6.7 (it is absent in 6.6); on 6.1
-    # (Debian 12) the 3.0 build fails with 'implicit declaration of nla_put_uint'.
+    # Returns 0 if the kernel version is >= 6.7 - there we take the module from the
+    # PPA as is. Returns 1 if the kernel is older than 6.7 - there we go the pinned
+    # 2.0 route.
+    # ⚠️ The name is historical, do not read it literally. The 6.7 threshold comes
+    # from 30-31 jul 2026: the 3.0 code called nla_put_uint, absent before mainline
+    # v6.7, and on 6.1 (Debian 12) the build died with 'implicit declaration of
+    # nla_put_uint'. Upstream fixed that on 31 jul (v3.0.20260731-04), and the 3.0
+    # module DOES build on 6.1 now - verified on a stand on 1 aug. The threshold is
+    # kept deliberately: within a day the 3.0 line managed to break and fix the
+    # build on old kernels specifically, so that is where it is least proven, while
+    # the pinned 2.0 is checked against an immutable commit. Drop the threshold
+    # after validating 3.0, not because the build passes again.
     # Arg $1: kernel release (default uname -r). An unparseable version is treated
     # as "NOT supported" -> pinned 2.0 (it builds on ANY of our kernels, so the
     # conservative choice never breaks connectivity, it only withholds 3.0 features
@@ -2857,8 +2866,9 @@ _try_install_prebuilt_arm() {
 }
 
 # H0 (AWG 3.0, 31 jul 2026): on kernels < 6.7 the current PPA module is AmneziaWG
-# 3.0, which does not build (nla_put_uint only appeared in kernel 6.7). We install
-# the last pinned 2.0 module (the 1.0.x line) from source via DKMS:
+# 3.0, and we deliberately keep it out of there (why exactly - see
+# _kernel_supports_awg3). We install the last pinned 2.0 module (the 1.0.x line)
+# from source via DKMS:
 #   1. git clone the pinned tag --depth=1;
 #   2. VERIFY the commit against AWG2_PIN_COMMIT (integrity: an immutable commit is
 #      more robust than the GitHub auto-tarball SHA, which changes on recompression);
@@ -3168,13 +3178,14 @@ PPASRC
     # H0 (AWG 3.0, 31 jul 2026): decide the pinned 2.0 module path BEFORE installing
     # any package - the hold must be in place before even the ARM prebuilt path, where
     # install_packages installs amneziawg-tools whose Recommends would otherwise pull
-    # the incompatible 3.0 module. On kernels < 6.7 the PPA module is AmneziaWG 3.0
-    # (does not build: nla_put_uint), so we do not install it and build the pinned 2.0
-    # from source instead; only tools come from the PPA (version-aware, 2.0-compatible).
+    # in the 3.0 module behind the gate. On kernels < 6.7 the PPA module is AmneziaWG
+    # 3.0; we do not install it here (deliberately, see _kernel_supports_awg3) and
+    # build the pinned 2.0 from source instead; only tools come from the PPA
+    # (version-aware, they do work with 2.0 - verified).
     local use_pinned_awg2=0
     if ! _kernel_supports_awg3; then
         use_pinned_awg2=1
-        log "Kernel $(uname -r) is older than 6.7 - the PPA module (AmneziaWG 3.0) will not build here."
+        log "Kernel $(uname -r) is older than 6.7 - installing the tested AmneziaWG 2.0 module here, not 3.0 from the PPA."
         log "Activated the pinned AmneziaWG 2.0 module path from source ($AWG2_PIN_TAG)."
         # Re-entry: if a prior run / the stock installer already installed (or left
         # half-configured) the 3.0 package - remove it and its source, otherwise its
@@ -3189,15 +3200,17 @@ PPASRC
         fi
         # ⚠️ Hold BEFORE any install: amneziawg-tools RECOMMENDS amneziawg-dkms, apt
         # installs recommends by default -> without a hold, installing tools (incl. on
-        # the ARM path) would pull the 3.0 dkms and fail on its build. This is a safety
-        # mechanism, so its failure is fatal (we verify the hold actually took effect).
+        # the ARM path) would drag in the 3.0 dkms, leaving TWO DKMS trees under the
+        # same module name amneziawg - the pinned 2.0 one and the packaged 3.0 one.
+        # This is a safety mechanism, so its failure is fatal (we verify the hold took
+        # effect).
         apt-mark hold amneziawg-dkms amneziawg >/dev/null 2>&1 || true
         # We verify amneziawg-dkms specifically - it is the load-bearing package: it
         # is what amneziawg-tools Recommends and what carries the 3.0 module. The
         # metapackage amneziawg need not be held (its Depends: amneziawg-dkms is held
         # anyway), so we do not verify it separately.
         if ! apt-mark showhold 2>/dev/null | grep -qx "amneziawg-dkms"; then
-            die "Failed to hold amneziawg-dkms. Without it, installing amneziawg-tools would pull the incompatible AmneziaWG 3.0 module. Aborted (check for an apt/dpkg lock)."
+            die "Failed to hold amneziawg-dkms. Without it, installing amneziawg-tools would pull the AmneziaWG 3.0 module from the PPA, bypassing the chosen path. Aborted (check for an apt/dpkg lock)."
         fi
     else
         # Kernel >= 6.7: the normal path installs amneziawg-dkms from the PPA. Clear a
@@ -3210,8 +3223,10 @@ PPASRC
     # ⚠️ On a kernel < 6.7 (use_pinned_awg2=1) using the prebuilt .deb is SAFE: our ARM
     # prebuilts are built from scripts/arm-module-version.txt, pinned to the same 2.0
     # tag (v1.0.20260725) and locked by a test, so it is a KNOWN 2.0 module, not 3.0.
-    # And 3.0 physically cannot compile for a kernel < 6.7, so a 3.0 asset for such a
-    # target (e.g. debian-bookworm-arm64) cannot exist in the release - on no match
+    # ⚠️ That is the ONLY guarantee, and it is enough. The former second argument -
+    # "3.0 cannot compile for a kernel < 6.7 anyway, so a 3.0 asset for a target like
+    # debian-bookworm-arm64 cannot exist in the release" - is WRONG as of 31 jul 2026
+    # (upstream fixed the build, v3.0.20260731-04); do not lean on it. On no match
     # _try_install_prebuilt_arm returns 1 and we fall through to the verified source
     # build below. The hold set above also applies here (keeps tools from pulling the
     # 3.0 dkms via Recommends).
@@ -3306,10 +3321,13 @@ PPASRC
     if [[ "$use_pinned_awg2" -eq 1 ]]; then
         if ! _install_pinned_awg2_module; then
             log_error "Failed to install the pinned AmneziaWG 2.0 module."
-            log_error "Kernel $(uname -r) is older than 6.7, and the current PPA module is"
-            log_error "AmneziaWG 3.0, which does not build on this kernel. Options: upgrade the"
-            log_error "kernel to 6.7+ (on Debian 12 via bookworm-backports) or reinstall the VPS"
-            log_error "on Ubuntu 24.04/25.10 or Debian 13. See README/INSTALL_VPS for details."
+            log_error "On kernels older than 6.7 (yours is $(uname -r)) the installer does not take"
+            log_error "the module from the PPA but builds it from source, and that step did not go"
+            log_error "through. The exact reason is in the lines above; usually it is missing kernel"
+            log_error "headers, no free space, a dropped network, or a module that built but will"
+            log_error "not load (Secure Boot). Fallback option: deploy the server on Ubuntu"
+            log_error "24.04/25.10 or Debian 13, where the module comes as a package from the PPA."
+            log_error "See README/INSTALL_VPS for details."
             die "The pinned AmneziaWG 2.0 module was not installed."
         fi
         log "The pinned AmneziaWG 2.0 module is installed; PPA dkms is held (3.0 protection)."

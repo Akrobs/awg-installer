@@ -12,9 +12,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Installer messages about the pinned 2.0 module no longer call the 3.0 build impossible.** On 31 July upstream fixed `nla_put_uint` ([issue #204](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module/issues/204), version `v3.0.20260731-04`), and the PPA 3.0 module now builds on Debian 12 as well - verified on kernel 6.1.0-51. The 6.7 threshold in the installer is unchanged, but the reasoning behind it is different: on older kernels we deliberately keep the module we have tested rather than route around one that cannot build. Messages in both installers, the code comments, `ADVANCED.md`/`ADVANCED.en.md`, `INSTALL_VPS.md` and the ARM build pin are brought in line, and the v5.23.0 entry is marked as describing release day. Install behaviour is unchanged
+
 ## [5.23.0] - 2026-07-31
 
 **v5.23.0** - installs keep working on Debian 12 and other pre-6.7 kernels now that upstream shipped AmneziaWG 3.0 and switched the PPA to it.
+
+> Update, 1 August 2026: what follows describes the state on release day. Upstream fixed the pre-6.7 build of the 3.0 module the same evening (`v3.0.20260731-04`), and the PPA package builds on Debian 12 again - verified on kernel 6.1.0-51. The pinned path stays on purpose: in its first days the 3.0 line managed to break and then fix the build on old kernels specifically, so 2.0 stays there until it is validated separately.
 
 ### Added
 
