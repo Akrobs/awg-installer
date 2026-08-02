@@ -1313,6 +1313,19 @@ generate_awg_params() {
         AWG_S2=$(rand_range 15 150)
     done
 
+    # ⚠️ The lower bounds of S3/S4 are incompatible with AmneziaWG 3.0 header
+    # protection. There the ChaCha20 nonce is never transmitted: it is taken from
+    # the first 12 bytes of the S padding of the message in question
+    # (HEADER_PROTECTION_NONCE_SIZE = 12), so both implementations REJECT a config
+    # where any of S1-S4 is below 12 while a header protection key is set. The
+    # kernel module returns -EINVAL (src/netlink.c, has_protection && val16 <
+    # HEADER_PROTECTION_NONCE_SIZE); amneziawg-go errors out in device/uapi.go
+    # (present since v3.0.0). So the failure is LOUD - there is no silent crypto
+    # weakening; verified against upstream sources on 2 aug 2026. While we stay on
+    # 2.0 and set no header protection key, these ranges are safe. WHEN header
+    # protection is enabled, raise both lower bounds to 12, otherwise a share of
+    # installs will simply fail to bring the interface up. Keep this in step with
+    # the _kernel_supports_awg3 gate.
     AWG_S3=$(rand_range 8 55)
     AWG_S4=$(rand_range 4 27)
 
