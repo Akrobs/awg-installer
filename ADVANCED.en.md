@@ -12,6 +12,13 @@ This is a supplement to the main [README.en.md](README.en.md), containing deeper
 - [✨ Features (Detailed)](#features-detailed-adv)
 - [🔐 AWG 2.0 Parameters](#awg2-params-adv)
   - [Presets (v5.10.0+)](#presets-adv)
+- [🆕 AmneziaWG 3.0 for self-hosted servers](#awg3-adv)
+  - [Which module line you get](#awg3-lines-adv)
+  - [What 3.0 changes on the wire](#awg3-wire-adv)
+  - [The new 3.0 parameters](#awg3-params-adv)
+  - [What has to match and what does not](#awg3-must-match-adv)
+  - [Three things that can cost you an evening](#awg3-gotchas-adv)
+  - [What the installer does not enable yet](#awg3-not-yet-adv)
 - [⚙️ Client Configuration Details](#config-details-adv)
   - [AllowedIPs](#allowedips-adv)
   - [Client Isolation](#client-isolation-adv)
@@ -23,6 +30,7 @@ This is a supplement to the main [README.en.md](README.en.md), containing deeper
   - [UFW Firewall](#ufw-adv)
   - [Kernel Parameters (Sysctl)](#sysctl-adv)
   - [Fail2Ban (Automatic Setup)](#fail2ban-adv)
+  - [Rotating the server key](#server-key-rotation-adv)
 - [🧹 Server Optimization](#optimization-adv)
 - [📋 Configuration Examples](#config-examples-adv)
 - [⚙️ CLI Parameters](#cli-params-adv)
@@ -151,6 +159,105 @@ sudo bash install_amneziawg_en.sh --jc=2 --jmin=20 --jmax=60 --yes --route-amnez
 | `--jmax=N` | 0-1280 | Maximum junk size (bytes), must be ≥ Jmin |
 
 > **Tip:** If VPN works on home Wi-Fi but is unstable on mobile data — reinstall with `--preset=mobile`. More about mobile carrier issues in the <a href="#faq-advanced-adv">FAQ</a>.
+
+---
+
+<a id="awg3-adv"></a>
+## 🆕 AmneziaWG 3.0 for self-hosted servers
+
+In late July 2026 the Amnezia team released **AmneziaWG 3.0** and switched the PPA over to it. On x86 with kernel 6.7 or newer the installer **already gives you the 3.0 module** - there is nothing to opt into, and your existing configs keep working.
+
+To see what you actually have:
+
+```bash
+awg --version                        # amneziawg-tools v3.0.20260730
+modinfo amneziawg | grep ^version    # version: 3.0.20260731-04
+```
+
+⚠️ The apt package versions do not answer this. There `amneziawg-dkms` reads as `1.0.0-0~202608010147+c78a89e~ubuntu24.04.1` and `amneziawg-tools` as `1.0.20210914-0~...`: the leading part is packaging, the real content is the commit hash in the suffix. The two commands above answer directly.
+
+<a id="awg3-lines-adv"></a>
+### Which module line you get
+
+| Condition | What gets installed | Protocol |
+|---|---|---|
+| x86_64, kernel >= 6.7 | `amneziawg-dkms` from `ppa:amnezia/ppa` | **3.0** |
+| any arch, kernel older than 6.7 (Debian 12 on 6.1) | pinned module built from source | 2.0 |
+| ARM64 / armhf with a prebuilt for your kernel | our prebuilt package | 2.0 |
+| ARM64 / armhf with no prebuilt, kernel >= 6.7 | `amneziawg-dkms` from the PPA | **3.0** |
+
+That last row is not hypothetical: prebuilt ARM packages are built for Raspberry Pi 3/4/5, Ubuntu 24.04 and 25.10 ARM64, and Debian 12/13 ARM64. Ubuntu 26.04 ARM64 is not on that list yet, and on such a host the installer finds no match, falls through to the normal DKMS path and installs the PPA module, which is the third version.
+
+On older kernels we pick 2.0 **on purpose**, not because 3.0 fails to build there. For the first day after the release it genuinely did fail on kernel 6.1; upstream fixed that on 31 July and it builds now. But old kernels are exactly where the 3.0 line has had the least mileage, while the pinned 2.0 is verified against an immutable commit. The threshold will be lifted after a separate validation, not because the build passes again.
+
+On ARM the installer tries the prebuilt package first, and if it finds one matching your kernel it never reaches the PPA at all. The prebuilt packages are pinned to 2.0. With no match, the same rule as on x86 takes over: a kernel older than 6.7 gets the pinned 2.0 from source, a newer one gets the PPA module.
+
+<a id="awg3-wire-adv"></a>
+### What 3.0 changes on the wire, and what it does not
+
+Nothing you have already configured. Measured: four interfaces with configs from different generations come up and pass traffic at the same time on one 3.0 module - with no AWG parameters at all, in 1.x style, in 2.0 style, and with 3.0 parameters.
+
+The mechanism: `H1`-`H4` became ranges inside the module, but an interface that does not set them gets single-value ranges holding exactly the WireGuard message types. That is visible on the wire too:
+
+| Interface | What goes out |
+|---|---|
+| no AWG parameters | bytes `01 00 00 00` at offset 0, i.e. plain WireGuard |
+| `S1 = 100`, `H1 = 1234567` | the `H1` value at offset 100, junk packets from `Jc` ahead of it |
+
+A scalar `H1 = 12345` from a 2.0 config is parsed as a range of one number, and that exact number goes on the wire. So upgrading the module does not by itself break anything for your clients.
+
+<a id="awg3-params-adv"></a>
+### The new 3.0 parameters
+
+Compared with the previous `amneziawg-tools` release, seven config keys were added and **none were removed**: everything from 2.0 (`Jc`/`Jmin`/`Jmax`, `S1`-`S4`, `H1`-`H4`, `I1`-`I5`) is still accepted.
+
+| Parameter | What it does | Must match on both ends? |
+|---|---|---|
+| `HeaderProtectionKey` | ChaCha20 header encryption | **yes, otherwise there is no handshake at all** |
+| `ContentPaddingAddition` | extra padding inside the encrypted part | no |
+| `RekeyAfterTime` | when to start rekeying | no |
+| `RekeyTimeout` | pause between handshake attempts | no |
+| `RejectAfterTime` | when a session counts as expired | no |
+| `KeepaliveTimeout` | pause before a keepalive packet | no |
+| `MaxHandshakeAttempts` | how many handshake attempts to make | no |
+
+All seven work through `awg-quick` as well: it hands every key it does not consume itself to `awg setconf`, so hand-written configs need nothing special.
+
+<a id="awg3-must-match-adv"></a>
+### What has to match and what does not
+
+This is the part most often misread, because the kernel module's own README still describes only 1.x/2.0, and the `amneziawg-go` README splits parameters into server-side and client-side without the details.
+
+- **`S1`-`S4` have to match.** These are not just padding: the receiver reads the message type **at the offset** given by its own `S`. Different values mean the packet is not recognised.
+- **`H1`-`H4` have to be compatible.** The sender picks a value from its range and the receiver checks that the value falls inside its own. Keeping them identical is simpler.
+- **`HeaderProtectionKey` has to be identical.** Tested: the key on the server only, on the client only, or two different keys all give no handshake and 100% loss. It is not a gradual degradation but a switch: the moment the server has it, every peer without it drops.
+- **`Jc`/`Jmin`/`Jmax` and `I1`-`I5` do not have to match.** Junk and concealment packets are sent by whoever initiates the handshake, and the other side simply ignores them.
+
+<a id="awg3-gotchas-adv"></a>
+### Three things that can cost you an evening
+
+**`HeaderProtectionKey` requires `S1`-`S4` to be at least 12.** The nonce for header encryption is never transmitted; it is taken from the first 12 bytes of the S padding, so a smaller value makes the config invalid. Exactly 12 is fine, even though the kernel message says "must be more then 12".
+
+**That message is invisible by default.** `awg` prints only `Unable to modify interface: Invalid argument`, while the explanation goes to the kernel debug log. To see it:
+
+```bash
+echo "module amneziawg +p" > /sys/kernel/debug/dynamic_debug/control
+# repeat the failing command, then look at: dmesg | tail
+echo "module amneziawg -p" > /sys/kernel/debug/dynamic_debug/control
+```
+
+**A parameter cannot be removed with `awg setconf` or `awg syncconf`.** Drop the line from the config, apply it again, and the value stays: for AWG parameters these commands only add. Getting an interface back to a clean state means recreating it, that is `systemctl restart awg-quick@awg0` (or `awg-quick down` then `up`).
+
+<a id="awg3-not-yet-adv"></a>
+### What the installer does not enable yet, and why
+
+None of the 3.0 features appear in generated configs, and that is deliberate:
+
+- **`HeaderProtectionKey`** needs every one of your clients to understand it at the same time. As of this release `amneziawg-android` 3.0.1 is still a prerelease and the newest `amneziawg-windows-client` release is 2.0.2. Turning it on now would cut off some devices without warning.
+- **`ContentPaddingAddition`** waits on an upstream fix: right now the padding breaks keepalive detection and those packets are dropped with `Packet is neither ipv4 nor ipv6` ([issue #186](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module/issues/186)).
+- **The timer parameters** are one-sided and safe, but on their own they buy little, so they travel with the next step.
+
+The situation on kernels older than 6.7 is covered separately in <a href="#debian-support-adv">Debian support</a>.
 
 ---
 
@@ -301,6 +408,58 @@ File: `/etc/sysctl.d/99-amneziawg-security.conf`. Includes:
 Starting with v5.7.2, the `awgsetup_cfg.init` parameters file is loaded via `safe_load_config()` — a whitelist parser that only accepts predefined keys (`AWG_*`, `OS_*`, `DISABLE_IPV6`, `ALLOWED_IPS_*`, `NO_TWEAKS`, etc.). The previous `source` method has been completely replaced. The parser correctly handles values in both single and double quotes (`'value'` or `"value"`).
 
 This protects against potential code injection: even if the configuration file is modified, arbitrary commands will not execute.
+
+<a id="server-key-rotation-adv"></a>
+### Rotating the server key
+
+You need this if the server private key leaked somewhere: into a screenshot, a forum post, or someone else's hands along with access. There is no dedicated command for it, but reinstalling the server is not required either.
+
+First, what not to worry about. **Previously recorded traffic cannot be decrypted** - the handshake's forward secrecy covers that, and session keys are not derivable from the server's static key. The real risk is different: whoever holds the key can **impersonate your server** to a client that trusts it. So rotating closes the problem not when the server changes, but when **every client has the new config**.
+
+The key lives in three places and all three have to change together:
+
+| File | What it holds |
+|---|---|
+| `/etc/amnezia/amneziawg/awg0.conf` | the `PrivateKey` line in the `[Interface]` section |
+| `/root/awg/server_private.key` | the same private key as a separate file |
+| `/root/awg/server_public.key` | the public key, used to build client configs |
+
+The order is:
+
+```bash
+# 1. Backup, in case you need to roll back
+bash /root/awg/manage_amneziawg.sh backup
+
+# 2. A new key pair
+umask 077
+awg genkey > /root/awg/server_private.key
+awg pubkey < /root/awg/server_private.key > /root/awg/server_public.key
+chmod 600 /root/awg/server_private.key /root/awg/server_public.key
+
+# 3. Put the private key into the server config.
+#    The [Peer] section has no PrivateKey line, so the first one in the file
+#    is the right one. awk with -v is safe for keys: base64 contains / and +,
+#    which would need escaping with sed but not here.
+cd /etc/amnezia/amneziawg
+awk -v k="$(cat /root/awg/server_private.key)" \
+    '!d && /^[ \t]*PrivateKey[ \t]*=/ { print "PrivateKey = " k; d=1; next } { print }' \
+    awg0.conf > awg0.conf.new
+grep -q '^PrivateKey = ' awg0.conf.new && mv awg0.conf.new awg0.conf && chmod 600 awg0.conf
+
+# 4. Restart the service and reissue every client config
+systemctl restart awg-quick@awg0
+bash /root/awg/manage_amneziawg.sh regen
+```
+
+`regen` rewrites every client config with the new public key, regenerates the QR codes and `vpn://` links, and leaves client private keys, addresses and `AllowedIPs` alone. After that, **hand out the new configs**: until you do, the old ones do not work, and they are the ones still exposed.
+
+⚠️ **Three easy mistakes:**
+
+- **Skipping `server_private.key`.** Change the key only in `awg0.conf` and a `--force` reinstall brings the old one back: server keys are generated only when that file is missing, and the config is built from it.
+- **Skipping `regen`.** Existing clients keep `.conf`, `.png`, `.vpnuri` and `.vpnuri.png` files carrying the old public key. Anyone importing by QR or by link ends up with a config that cannot connect.
+- **Restoring an old backup later.** Archives in `/root/awg/backups/` contain both `awg0.conf` and the two key files, so restoring one silently undoes the rotation. Old archives are worth removing after a key change.
+
+To roll back: restore the three files from the backup, restart the service and **run `regen` again** - by then the client configs have already been rewritten with the new key.
 
 ---
 
@@ -677,7 +836,7 @@ Client keys are stored in `/root/awg/keys/` (permissions 600). Server keys are i
 The installer downloads `awg_common.sh` and `manage_amneziawg.sh` from URLs pinned to the specific version tag:
 
 ```
-https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.23.0/awg_common.sh
+https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.24.0/awg_common.sh
 ```
 
 This provides **supply chain pinning**: downloaded scripts match the installer version, even if `main` has already been updated.
@@ -697,12 +856,12 @@ To update the management and shared library scripts **without reinstalling the s
 
 ```bash
 # Russian version:
-wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.23.0/manage_amneziawg.sh
-wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.23.0/awg_common.sh
+wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.24.0/manage_amneziawg.sh
+wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.24.0/awg_common.sh
 
 # English version:
-wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.23.0/manage_amneziawg_en.sh
-wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.23.0/awg_common_en.sh
+wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.24.0/manage_amneziawg_en.sh
+wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.24.0/awg_common_en.sh
 
 # Set permissions
 chmod 700 /root/awg/manage_amneziawg.sh /root/awg/awg_common.sh

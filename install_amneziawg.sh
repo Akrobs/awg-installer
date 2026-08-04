@@ -8,15 +8,15 @@ fi
 # ==============================================================================
 # Скрипт для установки и настройки AmneziaWG 2.0 на Ubuntu/Debian серверах
 # Автор: @bivlked
-# Версия: 5.23.0
-# Дата: 2026-07-31
+# Версия: 5.24.0
+# Дата: 2026-08-04
 # Репозиторий: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
 # --- Безопасный режим и Константы ---
 set -o pipefail
 
-SCRIPT_VERSION="5.23.0"
+SCRIPT_VERSION="5.24.0"
 AWG_DIR="/root/awg"
 CONFIG_FILE="$AWG_DIR/awgsetup_cfg.init"
 STATE_FILE="$AWG_DIR/setup_state"
@@ -33,8 +33,8 @@ MANAGE_SCRIPT_PATH="$AWG_DIR/manage_amneziawg.sh"
 # Проверяются в step5_download_scripts() после curl.
 # Если AWG_BRANCH переопределён (не v$SCRIPT_VERSION), проверка пропускается.
 # Формат: sha256sum output (hex, 64 chars).
-COMMON_SCRIPT_SHA256="26ae997ffbc8c98eafa4f4846d66f8fe1aa3a4698bd079dea6cc045a9f608a12"
-MANAGE_SCRIPT_SHA256="ab580a06d0c5bdf017befad4379d15dcf7eb89e1718a4f9625781e7bb3e1b1c8"
+COMMON_SCRIPT_SHA256="7231f132c4659550f52ad8994133288b987c6bd9ac0b1b5d9978f7fb4fb7129c"
+MANAGE_SCRIPT_SHA256="dad2eea2ff4fa25a0ae0ef05942974afcf0f5a6181f152a8118d858edc9316f0"
 
 # AmneziaWG 2.0 пин (H0, 31 jul 2026). Upstream влил AmneziaWG 3.0 в default-ветку
 # amneziawg-linux-kernel-module, и PPA переключился на 3.0. Тогда на ядрах старее
@@ -1310,6 +1310,21 @@ generate_awg_params() {
     # часть установок просто не поднимет интерфейс. Держать в паре с гейтом
     # _kernel_supports_awg3.
     AWG_S3=$(rand_range 8 55)
+
+    # Вторая коллизия размеров: response+S2 != cookie+S3, то есть S3 != S2+28.
+    # Размеры сообщений (src/messages.h модуля ядра): init 148, response 92,
+    # cookie reply 64. Первые два измерены в проводе, cookie считается как
+    # 4 (header) + 4 (receiver_index) + 24 (nonce) + 32 (cookie 16 + authtag 16).
+    # Отсюда три условия совпадения итоговых размеров:
+    #   init/response   -> S2 = S1 + 56  (проверено циклом выше)
+    #   response/cookie -> S3 = S2 + 28  (проверяем здесь)
+    #   init/cookie     -> S3 = S1 + 84  (недостижимо: минимум S1+84 = 99 при
+    #                                     максимуме S3 = 55, цикл не нужен)
+    # Перегенерируем именно S3, а не S2: S2 уже прошёл проверку на S1+56.
+    while [[ $((AWG_S2 + 28)) -eq $AWG_S3 ]]; do
+        AWG_S3=$(rand_range 8 55)
+    done
+
     AWG_S4=$(rand_range 4 27)
 
     # H1-H4: 4 случайных непересекающихся uint32 диапазона.
