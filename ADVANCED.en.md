@@ -21,6 +21,7 @@ This is a supplement to the main [README.en.md](README.en.md), containing deeper
   - [What the installer does not enable yet](#awg3-not-yet-adv)
 - [⚙️ Client Configuration Details](#config-details-adv)
   - [AllowedIPs](#allowedips-adv)
+  - [What a site can see when traffic is split by destination](#split-detect-adv)
   - [Client Isolation](#client-isolation-adv)
   - [IPv6 Dual-Stack Tunnel (v5.15.0+)](#ipv6-tunnel-adv)
   - [PersistentKeepalive](#persistentkeepalive-adv)
@@ -283,6 +284,41 @@ Defines which traffic the **client** routes through the VPN tunnel.
 
 **AllowedIPs Calculator:** [WireGuard AllowedIPs Calculator](https://www.procustodibus.com/blog/2021/03/wireguard-allowedips-calculator/).
 
+<a id="split-detect-adv"></a>
+### What a site can see when traffic is split by destination
+
+Splitting traffic by destination picks the exit for a connection from where that connection is headed. That is how the [two-server cascade](CASCADE.en.md) works, and the [WARP scheme for the Russian segment](WARP-RU.en.md), and a client-side `AllowedIPs` list from which some networks were deliberately excluded - to have Russian sites open outside the VPN, say (that is mode 3 above; mode 2 does not belong here, it sends practically all public IPv4 into the tunnel).
+
+A site does not learn your address from the connection alone. A script on the page can ask a third-party IP lookup service instead - and the request to that service goes to a different address, so it may well leave through a different leg than the site itself. The service then reports the address of whichever exit it was reached from, the script hands that answer to the site, and the site holds two different addresses: the connection's source IP and whatever the script reported.
+
+The mismatch does not always happen: what decides it is which side of the split the service itself falls on. Land it on the same leg as the site and there is one address. The catch is that you do not get to choose, and in the sample below nearly all such services sat on the "foreign" side.
+
+The three schemes differ in what it costs you:
+
+- **a client-side list with exclusions.** The site sees your home address while the lookup request goes through the tunnel, so the site ends up with both - home and server;
+- **the cascade.** The site sees the entry server's address and the script reports the foreign exit's. Your home address is not exposed: both addresses are your own servers, provided the device's IPv6 is not going around the tunnel (see below);
+- **the WARP scheme.** The site sees a Cloudflare address, while the script reports the server's own - which is exactly the datacenter address the scheme was routing around.
+
+Adding lookup services to the exception list is an unreliable path. A check on 7 August 2026 against the snapshot of Russian networks in this repository (`cascade/ru.zone`, 8626 networks): I took 24 domains of popular services of this kind, resolved each through two resolvers (`dig @8.8.8.8` and `@77.88.8.8`) and ran the resulting addresses against the snapshot.
+
+- two domains landed inside the snapshot - `internet.yandex.ru` and `ipinfo.yandex.ru`, one and the same service under two names, sharing an address. The other 22 sat outside Russian networks, so a request to them leaves through the "foreign" leg;
+- a name in the `.ru` zone says nothing about the address itself: `2ip.ru` and `myip.ru` answered from addresses that are not in the snapshot;
+- the addresses are not stable either. `api.ipify.org` handed out three different addresses within a single day, and different resolvers answer differently: it is anycast behind Cloudflare. There is nothing to write into a list once.
+
+The check is easy to repeat: take the addresses from `dig` and run them against `cascade/ru.zone` with the `ipaddress` module from Python's standard library. ⚠️ This was measured against the snapshot the cascade uses. The WARP scheme has a list of its own - the antifilter BGP feed - and I did not check its contents this way: the mechanism is the same, but these particular numbers do not apply to it.
+
+What these numbers do NOT prove. How often sites actually compare the connection's address with what the script reported is something I did not measure. And the mismatch alone is no proof of a VPN: a dual-stack visitor with no VPN at all can open a site over IPv6 while the lookup service answers over IPv4. What is verified here is only that with traffic split the mismatch can appear, and that it is visible from outside.
+
+If a site has to see one and the same address, splitting by destination cannot guarantee that, no matter where the split sits. What removes the split is a full tunnel (`--route-all`): all traffic then leaves through one exit. One caveat: different IPv4 and IPv6 addresses of the same server can still remain, but that is the ordinary picture for any dual-stack connection and is not a sign of split traffic. And if the address has to be Russian, the server has to be in Russia.
+
+**IPv6 is a separate layer, and an easy one to mix up.** When the guides say "IPv6 is off, that is how the installer sets it up", they mean IPv6 **on the server** (the host sysctl). IPv6 **on your device** is something the installer never touches, and the traffic split does not apply to it either: the list of Russian networks used by the cascade and the BGP feed used by the WARP scheme are IPv4-only (the `cascade/ru.zone` snapshot holds no IPv6 entries at all). Whether your device's IPv6 goes around the tunnel is decided not by the scheme but by whether a `::/0` route made it into `AllowedIPs`:
+
+- **full tunnel without `--allow-ipv6-tunnel`** (the default): the client gets `0.0.0.0/0, ::/0`, so the device's IPv6 goes into the tunnel. The tunnel itself carries no IPv6, so that traffic gets no further - but it does not leak outside the VPN either;
+- **split routing** (modes 2 and 3, mode 2 being the default): `::/0` is never added, since that would break the split itself. The device's IPv6 goes around the tunnel with its real address, and then the site needs no scripts at all - it sees that address directly;
+- **`--allow-ipv6-tunnel` enabled**: the rules are different and depend on whether the server has native IPv6. They are documented in exactly one place, [IPv6 Dual-Stack Tunnel](#ipv6-tunnel-adv) - including the case where the client only gets the tunnel ULA and the device's global IPv6 goes around again.
+
+To check from a connected device: `curl -6 ifconfig.co`. Look at the address rather than at the fact that an answer arrived - with IPv6 working inside the tunnel an answer comes back too. If it is your home address, IPv6 is going around the tunnel. If you want a guarantee that nothing does, turn IPv6 off on the device itself: a server-side filter does not help here, because that direct IPv6 traffic never reaches the server.
+
 <a id="client-isolation-adv"></a>
 ### Client Isolation
 
@@ -305,7 +341,7 @@ The setting is persisted in `awgsetup_cfg.init` (the `CLIENT_ISOLATION` key). Ju
 
 By default the tunnel carries IPv4 only. Starting with v5.15.0 you can also enable IPv6 inside the tunnel - clients get an IPv6 address next to IPv4 (dual-stack).
 
-> **IPv6 in the default IPv4-only mode.** When the tunnel is IPv4-only, your device's IPv6 traffic goes out directly, outside the VPN - by design: an IPv4-only tunnel does not carry IPv6, and the server has no say in it (this is a property of the mode, not a server-side leak). If you want IPv6 inside the tunnel, enable `--allow-ipv6-tunnel` (below). If instead you want a guarantee that nothing goes outside the VPN, turn IPv6 off on the device itself: a server-side filter does not help here, because that direct IPv6 traffic never reaches the server.
+> **IPv6 in the default IPv4-only mode.** When the tunnel is IPv4-only, your device's IPv6 traffic goes out directly, outside the VPN - by design: an IPv4-only tunnel does not carry IPv6, and the server has no say in it (this is a property of the mode, not a server-side leak). One qualifier: that holds for split routing (modes 2 and 3). In a full tunnel (`--route-all`) the client is handed `::/0` next to `0.0.0.0/0`, so the device's IPv6 goes into the tunnel and dies there rather than going out directly - see [What a site can see when traffic is split by destination](#split-detect-adv). If you want IPv6 inside the tunnel, enable `--allow-ipv6-tunnel` (below). If instead you want a guarantee that nothing goes outside the VPN, turn IPv6 off on the device itself: a server-side filter does not help here, because that direct IPv6 traffic never reaches the server.
 
 **When it activates:** only with the explicit `--allow-ipv6-tunnel` flag on `install_amneziawg.sh`. Without the flag the behavior is identical to earlier versions. This is separate from `--allow-ipv6` / `--disallow-ipv6`, which control host-level IPv6 (sysctl) and are unchanged.
 
