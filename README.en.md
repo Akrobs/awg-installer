@@ -4,12 +4,12 @@
 </p>
 
 <p align="center">
-  <img src="logo.jpg" alt="AmneziaWG 2.0 VPN installer for Ubuntu, Debian, Raspberry Pi and ARM64 VPS" width="600">
+  <img src="logo.jpg" alt="AmneziaWG 2.0 / 3.0 VPN installer for Ubuntu, Debian, Raspberry Pi and ARM64 VPS" width="600">
 </p>
 
-<h1 align="center">Install AmneziaWG 2.0 VPN on Ubuntu and Debian VPS</h1>
+<h1 align="center">Install AmneziaWG 2.0 / 3.0 VPN on Ubuntu and Debian VPS</h1>
 
-<p align="center"><em>One-command, self-hosted AmneziaWG 2.0 VPN for Ubuntu 24.04 / 25.10 / 26.04 and Debian 12 / 13. Kernel-native DKMS, no Docker, no web panel, runs on any cheap VPS.</em></p>
+<p align="center"><em>One-command, self-hosted AmneziaWG 2.0 / 3.0 VPN for Ubuntu 24.04 / 25.10 / 26.04 and Debian 12 / 13. Kernel-native DKMS, no Docker, no web panel, runs on any cheap VPS.</em></p>
 
 <p align="center">
   <a href="https://bivlked.github.io/amneziawg-installer/"><img src="https://img.shields.io/badge/Website-bivlked.github.io-3ddc97" alt="Project website"></a>
@@ -38,7 +38,7 @@ chmod +x install_amneziawg_en.sh
 sudo bash ./install_amneziawg_en.sh
 ```
 
-> What it does: installs AmneziaWG 2.0 (kernel module via DKMS), configures the firewall and forwarding, creates the first client, and prints a QR code plus a `vpn://` link for one-tap import into the Amnezia client. Adding a friend or a device later is a single `add` command.
+> What it does: installs AmneziaWG (kernel module via DKMS; which protocol line you end up with is covered in [AmneziaWG 3.0](#awg3)), configures the firewall and forwarding, creates the first client, and prints a QR code plus a `vpn://` link for one-tap import into the Amnezia client. Adding a friend or a device later is a single `add` command.
 > 3 commands. 2 reboots along the way. About 20 minutes to a working VPN. For a clean Ubuntu/Debian VPS, not a home router or shared hosting. [Details →](#installation)
 
 > 📘 Full deployment guide: [Install AmneziaWG VPN server on Ubuntu/Debian VPS](INSTALL_VPS.md) - covers VPS choice, ARM, troubleshooting, and uninstall.
