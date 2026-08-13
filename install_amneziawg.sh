@@ -8,15 +8,15 @@ fi
 # ==============================================================================
 # Скрипт для установки и настройки AmneziaWG 2.0 на Ubuntu/Debian серверах
 # Автор: @bivlked
-# Версия: 5.25.0
-# Дата: 2026-08-08
+# Версия: 5.26.0
+# Дата: 2026-08-13
 # Репозиторий: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
 # --- Безопасный режим и Константы ---
 set -o pipefail
 
-SCRIPT_VERSION="5.25.0"
+SCRIPT_VERSION="5.26.0"
 AWG_DIR="/root/awg"
 CONFIG_FILE="$AWG_DIR/awgsetup_cfg.init"
 STATE_FILE="$AWG_DIR/setup_state"
@@ -33,8 +33,8 @@ MANAGE_SCRIPT_PATH="$AWG_DIR/manage_amneziawg.sh"
 # Проверяются в step5_download_scripts() после curl.
 # Если AWG_BRANCH переопределён (не v$SCRIPT_VERSION), проверка пропускается.
 # Формат: sha256sum output (hex, 64 chars).
-COMMON_SCRIPT_SHA256="2b95c26e5868541bfb150068f49fd6e5c69062e00935be6d89b25fc3b61cdc1f"
-MANAGE_SCRIPT_SHA256="bbb5e3c5aac374ac1561ed68c528b9f81578b5f9bc3a92020f11b17ed6b9d5b5"
+COMMON_SCRIPT_SHA256="31de07c36ac687556376b9daceb12823b360230d1a879bc931203d768868e829"
+MANAGE_SCRIPT_SHA256="7f8a0959af2815bc40f571a47ead88c1b5e02148be24a96da49d3919ad72e3eb"
 
 # AmneziaWG 2.0 пин (H0, 31 jul 2026). Upstream влил AmneziaWG 3.0 в default-ветку
 # amneziawg-linux-kernel-module, и PPA переключился на 3.0. Тогда на ядрах старее
@@ -2094,6 +2094,54 @@ create_diagnostic_report() {
         echo ""
         echo "--- Routing Table ---"
         ip route 2>/dev/null
+        echo ""
+        echo "--- Cascade / Split Routing ---"
+        # Каскад (CASCADE.md) живёт вне awg0.conf: своя таблица, метка, ipset и правила mangle.
+        # Без этого блока по отчёту нельзя понять, применено деление или нет (issue #212).
+        if [ -f "$AWG_DIR/awg-routing.sh" ] || ip link show awg1 &>/dev/null; then
+            # is-active печатает "inactive" И возвращает ненулевой код, поэтому подстановка
+            # вида $(... || echo N/A) выдала бы ОБЕ строки сразу. Берём вывод, N/A - только на пустом.
+            local _casc_active _casc_enabled _casc_out
+            _casc_active=$(systemctl is-active awg-routing 2>/dev/null || true)
+            _casc_enabled=$(systemctl is-enabled awg-routing 2>/dev/null || true)
+            echo "unit awg-routing: active=${_casc_active:-N/A}, enabled=${_casc_enabled:-N/A}"
+            # Ниже намеренно разделены "не нашёл" и "не смог посмотреть": если гасить stderr и
+            # печатать одно и то же, отчёт превратит отказ команды в утверждение "правил нет",
+            # и разбор уйдёт не туда. grep -m10 вместо | head -10: он не рвёт пайп, поэтому
+            # pipefail не отдаёт 141 и ветка || не срабатывает после уже напечатанных строк.
+            if _casc_out=$(ip rule show 2>&1); then
+                grep -w fwmark <<< "$_casc_out" || echo "ip rule: правил по метке нет"
+            else
+                echo "ip rule: ПРОВЕРИТЬ НЕ УДАЛОСЬ: $(head -1 <<< "$_casc_out")"
+            fi
+            echo "table 100: $(ip route show table 100 2>/dev/null | tr '\n' '; ')"
+            echo "ipset sets: $(ipset list -n 2>/dev/null | tr '\n' ' ' || echo 'N/A')"
+            if _casc_out=$(ipset list ru 2>&1); then
+                grep "Number of entries" <<< "$_casc_out" || echo "ipset ru: счётчик не найден"
+            else
+                echo "ipset ru: набора нет ($(head -1 <<< "$_casc_out"))"
+            fi
+            echo "ru.zone: $(stat -c '%y, %s байт' "$AWG_DIR/ru.zone" 2>/dev/null || echo 'файла нет')"
+            if _casc_out=$(iptables -t mangle -S PREROUTING 2>&1); then
+                grep -m10 -E "match-set|MARK" <<< "$_casc_out" || echo "mangle PREROUTING: правил каскада нет"
+            else
+                echo "mangle PREROUTING: ПРОВЕРИТЬ НЕ УДАЛОСЬ: $(head -1 <<< "$_casc_out")"
+            fi
+            # Грепаем именно "-o awg1", а не MASQUERADE: обычное MASQUERADE на внешний интерфейс
+            # ставит сам установщик в PostUp, оно есть на ЛЮБОЙ установке, и по нему ветка "нет
+            # правил" была бы недостижима, а отчёт показывал бы NAT на месте при отсутствующем
+            # каскадном правиле. NAT проверяем обязательно: его скрипт ставит ПОСЛЕДНИМ, поэтому
+            # оборванный запуск оставляет всё остальное на месте, а его - нет. Симптом при этом
+            # обманчивый: российские сайты работают, остальное молчит, а отчёт без этой строки
+            # показывал бы полностью исправный каскад.
+            if _casc_out=$(iptables -t nat -S POSTROUTING 2>&1); then
+                grep -m10 -- "-o awg1" <<< "$_casc_out" || echo "nat POSTROUTING: правила каскада (-o awg1) нет"
+            else
+                echo "nat POSTROUTING: ПРОВЕРИТЬ НЕ УДАЛОСЬ: $(head -1 <<< "$_casc_out")"
+            fi
+        else
+            echo "не настроен"
+        fi
         echo ""
         echo "--- Kernel Params ---"
         sysctl net.ipv4.ip_forward net.ipv6.conf.all.disable_ipv6 2>/dev/null

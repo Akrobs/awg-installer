@@ -8,14 +8,14 @@ fi
 # ==============================================================================
 # AmneziaWG 2.0 installation and configuration script for Ubuntu/Debian servers
 # Author: @bivlked
-# Version: 5.25.0
-# Date: 2026-08-08
+# Version: 5.26.0
+# Date: 2026-08-13
 # Repository: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
 # --- Safe mode and Constants ---
 set -o pipefail
-SCRIPT_VERSION="5.25.0"
+SCRIPT_VERSION="5.26.0"
 
 AWG_DIR="/root/awg"
 CONFIG_FILE="$AWG_DIR/awgsetup_cfg.init"
@@ -33,8 +33,8 @@ MANAGE_SCRIPT_PATH="$AWG_DIR/manage_amneziawg.sh"
 # Verified in step5_download_scripts() after curl.
 # Verification is skipped when AWG_BRANCH is overridden (test branch).
 # Format: sha256sum output (hex, 64 chars).
-COMMON_SCRIPT_SHA256="725ddf3553e7147ac9fe91b6cac666e977e46b365df57b5c8b64d637ca74623b"
-MANAGE_SCRIPT_SHA256="2a1f5b1c12a76a57357bd1467e23dd16d86ca75e3bf45446c4fab1a928f23a39"
+COMMON_SCRIPT_SHA256="d60f963da91638c99287e61b3b6413648f9be2f4bf9ae65441f6e62c8da2a33d"
+MANAGE_SCRIPT_SHA256="259eab8bbe8562d71c6ec2780078276953e3ca6a59f4d2c427d47c8be1a13042"
 
 # AmneziaWG 2.0 pin (H0, 31 jul 2026). Upstream merged AmneziaWG 3.0 into the
 # amneziawg-linux-kernel-module default branch, and the PPA switched to it. Back
@@ -2111,6 +2111,55 @@ create_diagnostic_report() {
         echo ""
         echo "--- Routing Table ---"
         ip route 2>/dev/null
+        echo ""
+        echo "--- Cascade / Split Routing ---"
+        # The cascade (CASCADE.en.md) lives outside awg0.conf: its own table, mark, ipset and mangle
+        # rules. Without this block the report cannot tell whether the split is applied (issue #212).
+        if [ -f "$AWG_DIR/awg-routing.sh" ] || ip link show awg1 &>/dev/null; then
+            # is-active prints "inactive" AND returns non-zero, so $(... || echo N/A) would emit
+            # BOTH strings at once. Take the output as is; N/A only when it comes back empty.
+            local _casc_active _casc_enabled _casc_out
+            _casc_active=$(systemctl is-active awg-routing 2>/dev/null || true)
+            _casc_enabled=$(systemctl is-enabled awg-routing 2>/dev/null || true)
+            echo "unit awg-routing: active=${_casc_active:-N/A}, enabled=${_casc_enabled:-N/A}"
+            # "not found" and "could not check" are kept apart on purpose: silencing stderr and
+            # printing the same line would turn a failed command into a claim that the rules are
+            # absent, sending triage the wrong way. grep -m10 instead of | head -10: it does not
+            # break the pipe, so pipefail cannot return 141 and fire the || branch after output.
+            if _casc_out=$(ip rule show 2>&1); then
+                grep -w fwmark <<< "$_casc_out" || echo "ip rule: no rules by mark"
+            else
+                echo "ip rule: CHECK FAILED: $(head -1 <<< "$_casc_out")"
+            fi
+            echo "table 100: $(ip route show table 100 2>/dev/null | tr '\n' '; ')"
+            echo "ipset sets: $(ipset list -n 2>/dev/null | tr '\n' ' ' || echo 'N/A')"
+            if _casc_out=$(ipset list ru 2>&1); then
+                grep "Number of entries" <<< "$_casc_out" || echo "ipset ru: entry counter not found"
+            else
+                echo "ipset ru: set not present ($(head -1 <<< "$_casc_out"))"
+            fi
+            echo "ru.zone: $(stat -c '%y, %s bytes' "$AWG_DIR/ru.zone" 2>/dev/null || echo 'no file')"
+            if _casc_out=$(iptables -t mangle -S PREROUTING 2>&1); then
+                grep -m10 -E "match-set|MARK" <<< "$_casc_out" || echo "mangle PREROUTING: no cascade rules"
+            else
+                echo "mangle PREROUTING: CHECK FAILED: $(head -1 <<< "$_casc_out")"
+            fi
+            # Grep for "-o awg1" rather than MASQUERADE: a plain MASQUERADE on the external
+            # interface is added by the installer itself in PostUp, it exists on EVERY install, and
+            # matching it would make the "no rules" branch unreachable while the report showed NAT
+            # as present with the cascade rule missing. NAT must be checked: the script applies it
+            # LAST, so a run cut short
+            # leaves everything else in place but not that rule. The symptom is deceptive: Russian
+            # sites work and nothing else does, while a report without this line would show a
+            # perfectly healthy cascade.
+            if _casc_out=$(iptables -t nat -S POSTROUTING 2>&1); then
+                grep -m10 -- "-o awg1" <<< "$_casc_out" || echo "nat POSTROUTING: no cascade rule (-o awg1)"
+            else
+                echo "nat POSTROUTING: CHECK FAILED: $(head -1 <<< "$_casc_out")"
+            fi
+        else
+            echo "not configured"
+        fi
         echo ""
         echo "--- Kernel Params ---"
         sysctl net.ipv4.ip_forward net.ipv6.conf.all.disable_ipv6 2>/dev/null

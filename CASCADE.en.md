@@ -168,11 +168,24 @@ TABLE_ID=100                            # routing table number for "to the exit"
 FWMARK="0x1"                            # mark for traffic leaving via awg1
 RULE_PRIO=10000                        # ip rule priority (uncommon, to avoid collisions)
 RU_ZONE_URL="https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone"
-RU_ZONE_FALLBACK_URL="https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.25.0/cascade/ru.zone"
+RU_ZONE_FALLBACK_URL="https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.26.0/cascade/ru.zone"
 AWG_DIR="/root/awg"
+EXTRA_RU_NETS=""                        # your own addresses/networks to route through Russia (space
+                                        # separated), e.g. "203.0.113.7 198.51.100.0/24". Useful for
+                                        # .ru sites behind a foreign CDN: by address they look foreign
 # =============================================
 
 RU_ZONE="$AWG_DIR/ru.zone"
+mkdir -p "$AWG_DIR"
+
+# Locking: two simultaneous runs get in each other's way. Both race to replace the same ru set through
+# ru_tmp, and the loser fails with "The set with the given name does not exist"; on top of that both
+# write to a shared "$RU_ZONE.tmp", and the trap of the first one deletes the file of the second. The
+# usual case is the awg-routing unit finishing its boot run while you start the script by hand
+# (issue #212). Here the second instance WAITS instead of breaking.
+exec 9>"$AWG_DIR/awg-routing.lock"
+flock -w 300 9 || { echo "ERROR: another awg-routing.sh instance did not finish within 5 minutes - aborting" >&2; exit 1; }
+
 trap 'rm -f "$RU_ZONE.tmp"' EXIT         # do not leave the temp list file behind on exit/interrupt
 
 [ "$AWG1_ENDPOINT" != "CHANGE_ME" ] || { echo "ERROR: set AWG1_ENDPOINT (external IP of AWG1)" >&2; exit 1; }
@@ -194,10 +207,27 @@ fi
 # 1) Refresh the RU list. Sources in order: ipdeny (current) -> the snapshot bundled in the repository
 #    (if ipdeny is unreachable) -> whatever local list is already there. Replace the working file only on
 #    a successful, non-empty download, so a failed fetch never wipes the previous list.
-fetch_ru_zone() {                                # $1 = URL; downloads into a temp file, 0 on success and non-empty
-    curl -fsS --retry 2 -o "$RU_ZONE.tmp" "$1" && [ -s "$RU_ZONE.tmp" ]
+fetch_ru_zone() {                                # $1 = URL; downloads and VALIDATES the body, 0 on success
+    # Timeouts are mandatory: the script runs from a unit at boot, and the unit has a time budget.
+    # Without them a stalled download would eat all of it and systemd would kill the unit before
+    # the rules are applied. --retry-max-time bounds the SUM of the attempts: otherwise three
+    # retries of 30 s each add up to 93 s per URL.
+    curl -fsS --retry 2 --retry-max-time 45 --connect-timeout 10 --max-time 30 \
+        -o "$RU_ZONE.tmp" "$1" || return 1
+    # 🔴 The CONTENT has to be checked, not just that the file is non-empty. curl -f only rejects
+    # codes >= 400, so a provider stub page, a DPI interception page or a captcha served with 200
+    # would pass as a valid list, overwrite the working file and break the split until someone
+    # intervenes by hand.
+    local valid total
+    valid=$(grep -cE '^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$' "$RU_ZONE.tmp" || true)
+    # Count NON-EMPTY lines rather than all of them: otherwise a missing trailing newline or a
+    # blank line at the end would reject a perfectly good list, which the loader below tolerates.
+    total=$(grep -c '[^[:space:]]' "$RU_ZONE.tmp" || true)
+    if [ "$valid" -lt 1000 ] || [ "$valid" -ne "$total" ]; then
+        echo "WARN: $1 did not return a list of RU networks ($valid valid lines out of $total) - not taking it" >&2
+        return 1
+    fi
 }
-mkdir -p "$AWG_DIR"
 if fetch_ru_zone "$RU_ZONE_URL"; then
     mv -f "$RU_ZONE.tmp" "$RU_ZONE"
 elif fetch_ru_zone "$RU_ZONE_FALLBACK_URL"; then
@@ -216,6 +246,21 @@ ipset flush ru_tmp
 while read -r net; do
     [ -n "$net" ] && ipset add ru_tmp "$net" -exist
 done < "$RU_ZONE"
+# Add your own addresses to the same temp set BEFORE the swap, so they survive a run of the script.
+# Appending them to the live ru set is pointless: the next run rebuilds it and wipes the additions.
+# set -f disables globbing: without it an asterisk in the variable would expand to file names.
+# A malformed entry does NOT abort the script: from the boot unit that would leave the server with
+# no split at all, whereas this way only the exception itself is lost, and the warning says so.
+extra_total=0; extra_bad=0
+set -f
+for net in $EXTRA_RU_NETS; do
+    extra_total=$((extra_total + 1))
+    ipset add ru_tmp "$net" -exist || {
+        echo "WARN: EXTRA_RU_NETS: did not add '$net' - expected an address or a CIDR network" >&2
+        extra_bad=$((extra_bad + 1))
+    }
+done
+set +f
 ipset swap ru_tmp ru
 ipset destroy ru_tmp
 
@@ -250,7 +295,13 @@ iptables -t mangle -C PREROUTING -i awg0 -s "$CLIENT_SUBNET" -j MARK --set-mark 
 iptables -t nat -C POSTROUTING -s "$CLIENT_SUBNET" -o "$AWG1_IF" -j MASQUERADE 2>/dev/null \
     || iptables -t nat -A POSTROUTING -s "$CLIENT_SUBNET" -o "$AWG1_IF" -j MASQUERADE
 
-echo "OK: cascade routing applied (WAN=$WAN_IF, gw=${WAN_GW:-on-link}, exit=$AWG1_IF, table=$TABLE_ID)"
+# The final line must not lie: if some of your own addresses did not make it, they will leave
+# through the far leg, and a silent "OK" would send the investigation the wrong way.
+if [ "$extra_bad" -gt 0 ]; then
+    echo "OK WITH A CAVEAT: cascade applied, but $extra_bad of $extra_total EXTRA_RU_NETS entries were not added - those addresses will go through the foreign leg" >&2
+else
+    echo "OK: cascade routing applied (WAN=$WAN_IF, gw=${WAN_GW:-on-link}, exit=$AWG1_IF, table=$TABLE_ID)"
+fi
 ```
 
 Set your `CLIENT_SUBNET` and `AWG1_ENDPOINT` at the top, make the file executable, and run it. `CLIENT_SUBNET` is the network (ending in zero), not the server address: if `awg0.conf` has `Address = 172.16.17.1/24`, then `CLIENT_SUBNET="172.16.17.0/24"`. `AWG1_ENDPOINT` is the AWG1 public IP (from `Endpoint` in `awg1.conf`, without the port):
@@ -260,10 +311,13 @@ chmod +x /root/awg/awg-routing.sh
 bash /root/awg/awg-routing.sh
 ```
 
+`EXTRA_RU_NETS` is optional. It exists for individual addresses you want routed through the Russian leg against what the list says. The typical case is a site in the `.ru` zone sitting behind a foreign CDN: by destination address it looks foreign, so it leaves through the far leg. Keep such addresses here, because adding them to the live `ru` set by hand achieves nothing - the next run of the script rebuilds the set and wipes them.
+
 What the script does, step by step:
 
+0. Takes a lock on `/root/awg/awg-routing.lock`. If the script is already running (for example the `awg-routing` unit is finishing its boot run), the second instance waits up to 5 minutes and runs afterwards instead of breaking halfway through.
 1. Downloads the list of Russian networks into a temp file and swaps the working file only on a successful download. Sources are tried in order: ipdeny (the current list), then the snapshot bundled in this repository (`cascade/ru.zone`) if ipdeny is unreachable, then whatever local list is already there. A failed download will not wipe the already-loaded list.
-2. Loads the networks into `ipset` through a temp set and atomically swaps the working one (`ipset swap`) - with no window where the set is empty.
+2. Loads the networks into `ipset` through a temp set, adds your `EXTRA_RU_NETS` to the same set, and atomically swaps the working one (`ipset swap`) - with no window where the set is empty.
 3. Creates a routing table for marked traffic and an `ip rule` by mark. The table is addressed by number, so no `rt_tables` file is needed.
 4. Lays a route to AWG1 itself outside the tunnel, otherwise packets to it would loop.
 5. Marks traffic: to Russian networks - direct (`RETURN`), the rest - marked to leave via `awg1`.
@@ -287,6 +341,11 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/root/awg/awg-routing.sh
+# TimeoutStartSec is deliberately NOT set here. For Type=oneshot the start timeout is disabled
+# by default (verified: systemctl show -p TimeoutStartUSec on such a unit returns infinity, while
+# a Type=simple unit shows the manager default of 90 seconds). So a lock wait of up to 5 minutes
+# and a slow list load on a weak box do not kill the unit, whereas any finite value would
+# introduce a kill mid-run and leave the split half applied.
 
 [Install]
 WantedBy=multi-user.target
@@ -319,7 +378,12 @@ ipset list ru | grep "Number of entries"
 # the Russian address really is in the set
 ipset test ru 77.88.55.242
 # Warning: 77.88.55.242 is in set ru.
+
+# your own EXTRA_RU_NETS addresses are checked the same way, one by one
+ipset test ru 203.0.113.7
 ```
+
+If instead of the entry count you see `ipset v7.17: The set with the given name does not exist`, the `ru` set is not in the kernel, and without it the split does not work. The command only tells you the set is missing right now, not why: it may have failed to appear because a run of the script was cut short, or it may never have been created because the `awg-routing` unit did not start after a reboot. A cut-short run costs more than it looks: the `ipset` block runs before the routing part, so in that run neither the table nor the marking nor the NAT were applied. `ip rule` and `ip route show table 100` can still look correct, because they persist in the kernel from an earlier successful run and say nothing about the current state. Check the unit (`systemctl status awg-routing`), run the script again, and read its output to the end. A successful run ends with `OK: cascade routing applied`. If some of your `EXTRA_RU_NETS` addresses were not accepted, the last line is `OK WITH A CAVEAT` and the count of rejected entries: the cascade is applied, but those particular addresses will go through the foreign leg.
 
 Check that traffic splits correctly:
 
@@ -353,6 +417,8 @@ iptables -t mangle -L PREROUTING -n -v
 ## Updating the list of Russian networks
 
 The list of Russian networks changes over time. The script re-reads it on every run, so it is enough to restart it periodically. For example, weekly via cron:
+
+A scheduled run overlapping a manual one is no longer a concern: the script takes a lock, and whoever arrives second waits for its turn.
 
 ```bash
 echo '0 5 * * 1 root systemctl restart awg-routing' > /etc/cron.d/awg-routing-refresh
