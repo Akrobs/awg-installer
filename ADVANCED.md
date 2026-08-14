@@ -514,6 +514,21 @@ bash /root/awg/manage_amneziawg.sh regen
 
 **Удаляемые пакеты:** `snapd`, `modemmanager`, `networkd-dispatcher`, `unattended-upgrades`, `packagekit`, `lxd-agent-loader`, `udisks2`. Cloud-init удаляется **только** если не управляет сетевой конфигурацией.
 
+🔴 **Снос `snapd` забирает с собой установленные снапы и их данные в `/var/snap`.** Пакет удаляется через `purge`, а следом установщик убирает каталоги `/snap`, `/var/snap` и `/var/lib/snapd`, поэтому снапы уезжают при любом раскладе. Отменить это нельзя: `rm -rf` не откатывается, и сам `snapd` вернётся через `apt install snapd`, а снапы придётся ставить заново, данные из `/var/snap` - только из бэкапа. Домашние каталоги очистка не трогает, так что данные из `~/snap` остаются на месте.
+
+Начиная с v5.27.0 установщик спрашивает согласие. На шаге 0, где задаются и остальные вопросы, он печатает пакеты, которые реально стоят в системе, отдельной строкой предупреждает про каталоги снапов и называет поимённо те снапы, которые поставили вы. Базовыми, то есть не несущими ваших данных, считаются только `snapd`, `bare` и `core*`; `lxd` в их число НЕ входит, потому что LXD из снапа держит контейнеры в `/var/snap/lxd`. Когда под удаление попадает и cloud-init, отдельной строкой говорится про `/etc/cloud` и `/var/lib/cloud`.
+
+Если терять есть что, удаление происходит **только по явному согласию**: ответом считается `y`, `yes` или `да`, всё остальное означает «сохранить». Любая неудачная проверка тоже трактуется в пользу сохранения - недоступный терминал, неопрошенный `dpkg`, нечитаемый каталог снапов. Ответ записывается в `awgsetup_cfg.init`, чтобы повторный или возобновлённый запуск не спрашивал заново и не считал молчание согласием: очистка выполняется только при явно записанном согласии.
+
+Способов отказаться два, и они не равнозначны:
+
+| Флаг | Что пропускает | Когда нужен |
+|---|---|---|
+| `--keep-packages` | только очистку системы | оставить фаервол, Fail2Ban и оптимизацию, но не трогать пакеты |
+| `--no-tweaks` | очистку, оптимизацию, sysctl-hardening, UFW и Fail2Ban | сервер уже настроен своими средствами |
+
+С `--yes` вопрос не задаётся и поведение остаётся прежним, то есть пакеты удаляются: список при этом всё равно печатается в журнал. Для неинтерактивной установки, где пакеты нужно сохранить, добавьте `--keep-packages`.
+
 **Hardware-aware настройки:**
 * **Swap:** 1 ГБ при RAM ≤ 2 ГБ, 512 МБ при RAM > 2 ГБ. `vm.swappiness = 10`.
 * **NIC:** Отключение GRO/GSO/TSO (могут конфликтовать с VPN-трафиком).
@@ -682,8 +697,11 @@ PersistentKeepalive = 33
   --no-cps              Отключить CPS (параметр I1) - для десктопных клиентов, которые его не поддерживают (например, macOS)
   -y, --yes             Неинтерактивный режим (все подтверждения auto-yes)
   -f, --force           Переустановка поверх работающего AWG (ENV: AWG_FORCE_REINSTALL=1)
-  --no-tweaks           Пропустить необязательный hardening/оптимизацию (UFW,
+  --no-tweaks           Пропустить очистку системы, оптимизацию и hardening (UFW,
                         Fail2Ban); минимальный forwarding-sysctl применяется всегда
+  --keep-packages       Не удалять системные пакеты (snapd и др.), но оставить
+                        фаервол, Fail2Ban и оптимизацию. Снос snapd уносит
+                        установленные снапы и их данные в /var/snap
 ```
 
 <a id="manage-cli-adv"></a>
@@ -880,7 +898,7 @@ graph TD
 Инсталлятор скачивает `awg_common.sh` и `manage_amneziawg.sh` с URL, привязанных к конкретному тегу версии:
 
 ```
-https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.26.0/awg_common.sh
+https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.27.0/awg_common.sh
 ```
 
 Это даёт **supply chain pinning**: скачиваемые скрипты соответствуют версии инсталлятора, даже если `main` уже обновлён.
@@ -900,12 +918,12 @@ AWG_BRANCH=my-feature-branch sudo bash ./install_amneziawg.sh
 
 ```bash
 # Русская версия:
-wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.26.0/manage_amneziawg.sh
-wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.26.0/awg_common.sh
+wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.27.0/manage_amneziawg.sh
+wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.27.0/awg_common.sh
 
 # Английская версия:
-wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.26.0/manage_amneziawg_en.sh
-wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.26.0/awg_common_en.sh
+wget -O /root/awg/manage_amneziawg.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.27.0/manage_amneziawg_en.sh
+wget -O /root/awg/awg_common.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.27.0/awg_common_en.sh
 
 # Установить права
 chmod 700 /root/awg/manage_amneziawg.sh /root/awg/awg_common.sh
@@ -1797,7 +1815,7 @@ sudo systemctl status awg-quick@awg0
 
 * **LXC-контейнеры не поддерживаются моим инсталлятором.** AmneziaWG использует ядерный модуль (DKMS). LXC разделяет ядро с хостом — загрузить свой модуль из контейнера нельзя. Варианты: полноценная VM (KVM/QEMU) или bare-metal сервер для kernel-native установки, либо userspace-реализация `amneziawg-go` внутри LXC (см. [LXC / Docker через amneziawg-go](#lxc-userspace-adv)).
 
-* **Предполагается выделенный сервер.** Скрипт настраивает UFW, Fail2Ban, sysctl и оптимизирует систему под VPN. На сервере с другими сервисами используйте `--no-tweaks`, чтобы пропустить hardening.
+* **Предполагается выделенный сервер.** Скрипт настраивает UFW, Fail2Ban, sysctl и оптимизирует систему под VPN. На сервере с другими сервисами используйте `--no-tweaks`, чтобы пропустить hardening, либо `--keep-packages`, если мешает только удаление системных пакетов, а фаервол и оптимизация нужны.
 
 * **Один протокол AWG на сервере.** Все клиенты используют одинаковые параметры обфускации. Нельзя иметь часть клиентов на AWG 1.x и часть на 2.0 одновременно.
 
