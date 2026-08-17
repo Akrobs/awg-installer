@@ -183,7 +183,7 @@ cat /sys/module/amneziawg/version      # 3.1.20260812 - version of the LOADED mo
 <a id="awg3-31-adv"></a>
 ### What 3.1 added
 
-Inside the third line, release `v3.1.20260812` landed on 12 August 2026 and added exactly two device parameters. Our installer does not set them, but they are worth knowing about: enabled by hand, one of them breaks connectivity with every client that does not have it enabled too, whatever version that client is.
+Inside the third line, release `v3.1.20260812` landed on 12 August 2026 and added exactly two device parameters. The installer does not set them, but they are worth knowing about: enabled by hand, one of them breaks connectivity with every client that does not have it enabled too, whatever version that client is.
 
 | Parameter | Class | What it does |
 |---|---|---|
@@ -247,7 +247,7 @@ All seven work through `awg-quick` as well: it hands every key it does not consu
 
 🔴 **Six of the seven take a RANGE rather than a single number, and the value is drawn from it at random on every use.** Those are `ContentPaddingAddition`, `RekeyAfterTime`, `RekeyTimeout`, `RejectAfterTime`, `KeepaliveTimeout` and `MaxHandshakeAttempts`: the format is `lo-hi`, and a bare number is accepted too as a range of zero width. Verified in both implementations from the sources rather than from documentation: the kernel module declares them as `u16_range_t` (`src/device.h`) and draws the value in `u16_range_pick_one()` via `get_random_u32_inclusive()` (`src/type.h`); `amneziawg-go` uses the `UintRange` type with `FromString` and `PickOne` (`device/noise-types.go`) and parses the keys in `device/uapi.go`. That is the whole point: a constant handshake and keepalive interval was a tell in itself, and a range removes it. The one exception among the seven is `HeaderProtectionKey`, which is a key rather than a number.
 
-⚠️ Practical consequence: if you set these by hand, remember that `KeepaliveTimeout = 20-30` is neither a typo nor a "between these" timeout, it means a fresh random pick on every use. Our installer sets none of the seven.
+⚠️ Practical consequence: if you set these by hand, remember that `KeepaliveTimeout = 20-30` is neither a typo nor a "between these" timeout, it means a fresh random pick on every use. The installer sets none of the seven.
 
 <a id="awg3-must-match-adv"></a>
 ### What has to match and what does not
