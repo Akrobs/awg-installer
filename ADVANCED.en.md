@@ -245,6 +245,10 @@ Compared with the previous `amneziawg-tools` release, seven config keys were add
 
 All seven work through `awg-quick` as well: it hands every key it does not consume itself to `awg setconf`, so hand-written configs need nothing special.
 
+🔴 **Six of the seven take a RANGE rather than a single number, and the value is drawn from it at random on every use.** Those are `ContentPaddingAddition`, `RekeyAfterTime`, `RekeyTimeout`, `RejectAfterTime`, `KeepaliveTimeout` and `MaxHandshakeAttempts`: the format is `lo-hi`, and a bare number is accepted too as a range of zero width. Verified in both implementations from the sources rather than from documentation: the kernel module declares them as `u16_range_t` (`src/device.h`) and draws the value in `u16_range_pick_one()` via `get_random_u32_inclusive()` (`src/type.h`); `amneziawg-go` uses the `UintRange` type with `FromString` and `PickOne` (`device/noise-types.go`) and parses the keys in `device/uapi.go`. That is the whole point: a constant handshake and keepalive interval was a tell in itself, and a range removes it. The one exception among the seven is `HeaderProtectionKey`, which is a key rather than a number.
+
+⚠️ Practical consequence: if you set these by hand, remember that `KeepaliveTimeout = 20-30` is neither a typo nor a "between these" timeout, it means a fresh random pick on every use. Our installer sets none of the seven.
+
 <a id="awg3-must-match-adv"></a>
 ### What has to match and what does not
 
