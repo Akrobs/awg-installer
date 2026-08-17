@@ -38,7 +38,7 @@ chmod +x install_amneziawg_en.sh
 sudo bash ./install_amneziawg_en.sh
 ```
 
-> What it does: installs AmneziaWG (kernel module via DKMS; which protocol line you end up with is covered in [AmneziaWG 3.0](#awg3)), configures the firewall and forwarding, creates the first client, and prints a QR code plus a `vpn://` link for one-tap import into the Amnezia client. Adding a friend or a device later is a single `add` command.
+> What it does: installs AmneziaWG (kernel module via DKMS; which protocol line you end up with is covered in [AmneziaWG 3.x](#awg3)), configures the firewall and forwarding, creates the first client, and prints a QR code plus a `vpn://` link for one-tap import into the Amnezia client. Adding a friend or a device later is a single `add` command.
 > 3 commands. 2 reboots along the way. About 20 minutes to a working VPN. For a clean Ubuntu/Debian VPS, not a home router or shared hosting. [Details →](#installation)
 
 > 📘 Full deployment guide: [Install AmneziaWG VPN server on Ubuntu/Debian VPS](INSTALL_VPS.md) - covers VPS choice, ARM, troubleshooting, and uninstall.
@@ -83,7 +83,7 @@ All parameters are accepted automatically. Details: [ADVANCED.en.md#cli-params-a
 
 <p align="center">
   <a href="#why">Why this project</a> •
-  <a href="#awg3">AmneziaWG 3.0</a> •
+  <a href="#awg3">AmneziaWG 3.x</a> •
   <a href="#comparison">AWG vs WG</a> •
   <a href="#cli-vs-panel">CLI vs panels</a> •
   <a href="#similar-tools">Similar tools</a> •
@@ -116,9 +116,9 @@ Works on Ubuntu 24.04/25.10/26.04 and Debian 12/13. Any cheap VPS with 1 GB RAM 
 ---
 
 <a id="awg3"></a>
-## 🆕 AmneziaWG 3.0 ships already
+## 🆕 The third AmneziaWG line ships already
 
-**AmneziaWG 3.0** was released in late July 2026 and the PPA now points at it. On x86 with kernel 6.7 or newer the installer **already gives you the 3.0 module** - there is nothing to switch on, and the configs you have already handed out keep working untouched.
+**AmneziaWG 3.0** was released in late July 2026 and the PPA now points at it; on 12 August **3.1** followed inside the same line, and that is what the PPA now carries. On x86 with kernel 6.7 or newer the installer **already gives you a third-line module** - there is nothing to switch on, and the configs you have already handed out keep working untouched. Which exact release you get depends on what sits in the PPA on the day you install, so the command below is the one that answers precisely.
 
 To see what you actually have:
 

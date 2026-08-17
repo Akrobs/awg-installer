@@ -12,7 +12,8 @@ This is a supplement to the main [README.en.md](README.en.md), containing deeper
 - [✨ Features (Detailed)](#features-detailed-adv)
 - [🔐 AWG 2.0 Parameters](#awg2-params-adv)
   - [Presets (v5.10.0+)](#presets-adv)
-- [🆕 AmneziaWG 3.0 for self-hosted servers](#awg3-adv)
+- [🆕 The third AmneziaWG line for self-hosted servers](#awg3-adv)
+  - [What 3.1 added](#awg3-31-adv)
   - [Which module line you get](#awg3-lines-adv)
   - [What 3.0 changes on the wire](#awg3-wire-adv)
   - [The new 3.0 parameters](#awg3-params-adv)
@@ -164,30 +165,42 @@ sudo bash install_amneziawg_en.sh --jc=2 --jmin=20 --jmax=60 --yes --route-amnez
 ---
 
 <a id="awg3-adv"></a>
-## 🆕 AmneziaWG 3.0 for self-hosted servers
+## 🆕 The third AmneziaWG line for self-hosted servers
 
-In late July 2026 the Amnezia team released **AmneziaWG 3.0** and switched the PPA over to it. On x86 with kernel 6.7 or newer the installer **already gives you the 3.0 module** - there is nothing to opt into, and your existing configs keep working.
+In late July 2026 the Amnezia team released **AmneziaWG 3.0** and switched the PPA over to it; on 12 August **3.1** followed inside the same line (tag `v3.1.20260812`), and the PPA has carried it since that day. On x86 with kernel 6.7 or newer the installer **already gives you a third-line module** - there is nothing to opt into, and your existing configs keep working.
 
 To see what you actually have:
 
 ```bash
-awg --version                          # amneziawg-tools v3.0.20260730
-cat /sys/module/amneziawg/version      # 3.0.20260731-04 - version of the LOADED module
+awg --version                          # amneziawg-tools v3.1.20260812
+cat /sys/module/amneziawg/version      # 3.1.20260812 - version of the LOADED module
 ```
 
-⚠️ Ask the loaded module, not the file on disk. `modinfo amneziawg | grep ^version` reads the metadata of whichever `.ko` was selected on disk, so if a host ends up with two trees carrying a module of the same name (possible on ARM: the pinned 2.0 in `extra/` and DKMS 3.0 in `updates/dkms/`), it names the one that is not running in the kernel. `modinfo` is useful in exactly one case - when the module is not loaded and `/sys/module/amneziawg/` is absent; then it shows what sits on disk. Since v5.25.0 `manage check` and `manage diagnose` ask the loaded module and fall back to `modinfo` only as a second path.
+⚠️ Ask the loaded module, not the file on disk. `modinfo amneziawg | grep ^version` reads the metadata of whichever `.ko` was selected on disk, so if a host ends up with two trees carrying a module of the same name (possible on ARM: the pinned 2.0 in `extra/` and a third-line DKMS module in `updates/dkms/`), it names the one that is not running in the kernel. `modinfo` is useful in exactly one case - when the module is not loaded and `/sys/module/amneziawg/` is absent; then it shows what sits on disk. Since v5.25.0 `manage check` and `manage diagnose` ask the loaded module and fall back to `modinfo` only as a second path.
 
-⚠️ The apt package versions do not answer this. There `amneziawg-dkms` reads as `1.0.0-0~202608010147+c78a89e~ubuntu24.04.1` and `amneziawg-tools` as `1.0.20210914-0~...`: the leading part is packaging, the real content is the commit hash in the suffix. The two commands above answer directly.
+⚠️ The apt package versions do not answer this. There `amneziawg-dkms` reads as `1.0.0-0~202608140352+4680320~ubuntu24.04.1` and `amneziawg-tools` as `1.0.20210914-0~...`: the leading part is packaging, the real content is the commit hash in the suffix. The two commands above answer directly.
+
+<a id="awg3-31-adv"></a>
+### What 3.1 added
+
+Inside the third line, release `v3.1.20260812` landed on 12 August 2026 and added exactly two device parameters. Our installer does not set them, but they are worth knowing about: enabled by hand, one of them breaks connectivity with every client that does not have it enabled too, whatever version that client is.
+
+| Parameter | Class | What it does |
+|---|---|---|
+| `RandomTrailers` | 🔴 **two-sided** | Appends a random trailer to handshake packets. A receiver without the flag **does not recognise** the lengthened packet, so enabling it on the server alone cuts off every client that lacks it. |
+| `DisableCookies` | one-sided | The server stops sending cookie replies, removing a characteristic message type from observable traffic. No matching required between sides. ⚠️ In WireGuard those replies exist as protection against handshake floods from spoofed addresses, so dropping the signature drops that protection with it. |
+
+The kernel interface contract is unaffected: `WG_GENL_VERSION` is unchanged, so 3.0-line tools work with a 3.1 module.
 
 <a id="awg3-lines-adv"></a>
 ### Which module line you get
 
 | Condition | What gets installed | Protocol |
 |---|---|---|
-| x86_64, kernel >= 6.7 | `amneziawg-dkms` from `ppa:amnezia/ppa` | **3.0** |
+| x86_64, kernel >= 6.7 | `amneziawg-dkms` from `ppa:amnezia/ppa` | **3.x** |
 | any arch, kernel older than 6.7 (Debian 12 on 6.1) | pinned module built from source | 2.0 |
 | ARM64 / armhf with a prebuilt for your kernel | our prebuilt package | 2.0 |
-| ARM64 / armhf with no prebuilt, kernel >= 6.7 | `amneziawg-dkms` from the PPA | **3.0** |
+| ARM64 / armhf with no prebuilt, kernel >= 6.7 | `amneziawg-dkms` from the PPA | **3.x** |
 
 That last row is not hypothetical: prebuilt ARM packages are built for Raspberry Pi 3/4/5, Ubuntu 24.04 and 25.10 ARM64, and Debian 12/13 ARM64. Ubuntu 26.04 ARM64 is not on that list yet, and on such a host the installer finds no match, falls through to the normal DKMS path and installs the PPA module, which is the third version.
 
@@ -1582,7 +1595,7 @@ In late July 2026 the Amnezia team released **AmneziaWG 3.0** and switched the `
 
 The installer still keeps the **pinned last AmneziaWG 2.0 module** (tag `v1.0.20260725`, verified by commit hash) on such kernels: starting with **v5.23.0**, if the kernel is older than 6.7, the module is not taken from the PPA but built from source via DKMS. That is now a deliberate choice rather than a way around a broken build: in its first days the 3.0 line managed to break and then fix the build on old kernels specifically, so that is where it is least proven. The `amneziawg-tools` userland still comes from the PPA - the 3.0 tools work correctly with a 2.0 module, that part is verified. You do not need to install anything by hand; it all happens at step 2. On kernels 6.7 and newer (Ubuntu 24.04/25.10/26.04, Debian 13 trixie) the behaviour is unchanged - the module is installed from the PPA.
 
-If you specifically want AmneziaWG 3.0 on Debian 12, the simplest route is to deploy the server afresh on Debian 13 / Ubuntu 24.04+. The other route is to install a 6.7+ kernel from `bookworm-backports` and **reboot into it**: the installer looks at the running kernel, not at the installed one, so after the reboot it follows the normal path. On a server that is already set up, do not install on top: back it up (`sudo bash /root/awg/manage_amneziawg.sh backup`), remove the current install (`sudo bash install_amneziawg.sh --uninstall`) and install again - otherwise the pinned 2.0 module stays registered in DKMS under the same name as the PPA package. Support for the 3.0 features themselves (header protection, timing randomization) in the installer is planned separately and will land once the 3.0 stack and the client apps stabilize.
+If you specifically want the third AmneziaWG line on Debian 12, the simplest route is to deploy the server afresh on Debian 13 / Ubuntu 24.04+. The other route is to install a 6.7+ kernel from `bookworm-backports` and **reboot into it**: the installer looks at the running kernel, not at the installed one, so after the reboot it follows the normal path. On a server that is already set up, do not install on top: back it up (`sudo bash /root/awg/manage_amneziawg.sh backup`), remove the current install (`sudo bash install_amneziawg.sh --uninstall`) and install again - otherwise the pinned 2.0 module stays registered in DKMS under the same name as the PPA package. Support for the 3.0 features themselves (header protection, timing randomization) in the installer is planned separately and will land once the 3.0 stack and the client apps stabilize.
 
 ---
 
