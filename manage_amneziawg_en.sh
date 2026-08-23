@@ -8,14 +8,14 @@ fi
 # ==============================================================================
 # AmneziaWG 2.0 peer management script
 # Author: @bivlked
-# Version: 5.27.0
-# Date: 2026-08-14
+# Version: 5.27.1
+# Date: 2026-08-22
 # Repository: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
 # --- Safe mode and Constants ---
 # shellcheck disable=SC2034
-SCRIPT_VERSION="5.27.0"
+SCRIPT_VERSION="5.27.1"
 set -o pipefail
 AWG_DIR="/root/awg"
 SERVER_CONF_FILE="/etc/amnezia/amneziawg/awg0.conf"
@@ -1125,6 +1125,35 @@ modify_client() {
     fi
     log "Backup: $bak"
 
+    # List-valued parameters are normalised to the canonical "a, b, c" form
+    # (D#38): the installer writes them with a space after each comma, and
+    # modify must not leave a second, collapsed variant of the same value in
+    # the config.
+    #
+    # 🔴 Checking that the function exists is mandatory. _check_common_compat
+    # compares MAJOR.MINOR only and deliberately tolerates a patch-level drift,
+    # while awg_normalize_csv arrived in the 5.27.1 patch. On a half-updated
+    # server (a fresh manage next to an old library) the call would return an
+    # empty string, and that would silently replace the list of routes.
+    case "$param" in
+        AllowedIPs|DNS)
+            command -v awg_normalize_csv >/dev/null 2>&1 || {
+                log_error "awg_common.sh is out of date: awg_normalize_csv is missing. Update both halves to the same version."
+                exec {modify_lock_fd}>&-
+                return 1
+            }
+            local _norm
+            _norm=$(awg_normalize_csv "$value")
+            [[ -n "$_norm" ]] || {
+                log_error "Normalising '$param' produced an empty value - the change was cancelled."
+                exec {modify_lock_fd}>&-
+                return 1
+            }
+            value="$_norm"
+            log "Value normalised to: $value"
+            ;;
+    esac
+
     local escaped_value
     escaped_value=$(escape_sed "$value")
     if ! sed -i "s#^${param}[[:space:]]*=[[:space:]]*.*#${param} = ${escaped_value}#" "$cf"; then
@@ -1135,7 +1164,10 @@ modify_client() {
         exec {modify_lock_fd}>&-
         return 1
     fi
-    if ! grep -q -E "^${param} = " "$cf"; then
+    # An empty value is not accepted: the prefix-only check matched a line like
+    # "AllowedIPs = ", so wiping a setting was reported as success while the
+    # backup was deleted.
+    if ! grep -q -E "^${param} = .+" "$cf"; then
         log_error "Replacement failed for '$param'. Restoring..."
         if cp "$bak" "$cf"; then rm -f "$bak"; else log_warn "Restore error."; fi
         exec {modify_lock_fd}>&-

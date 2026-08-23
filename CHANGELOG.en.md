@@ -12,6 +12,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [5.27.1] - 2026-08-22
+
+**v5.27.1** - `manage regen` no longer collapses the `AllowedIPs` and `DNS` lists, and configs damaged by earlier versions are repaired by running the same command again.
+
+### Fixed
+
+- **`regen` silently collapsed the lists.** The installer writes `AllowedIPs` and `DNS` with a space after each comma, while `regenerate_client` read the current values from the client `.conf` through `tr -d '[:space:]'`, stripping the spaces together with the carriage return, and wrote what it had read straight back. The very first `regen` turned `1.0.0.0/8, 2.0.0.0/7` into `1.0.0.0/8,2.0.0.0/7`, and that form then survived every later reissue. The difference is invisible to the eye, and in the default "Amnezia List+DNS" mode it covers 34 entries. The values are now normalised to the canonical `a, b, c` form, so **a repeated `regen` not only preserves the format but also restores it in configs damaged by earlier versions**. Verified on a test server: after `regen` the damaged config matched the original byte for byte. Thanks to `@humowns` for the find and for checking the routes on his side ([discussion #38](https://github.com/bivlked/amneziawg-installer/discussions/38))
+- **`manage modify` stored the list exactly as it was typed.** The value was validated element by element but written verbatim, so `modify NAME AllowedIPs "a,b"` left a collapsed variant of the same list in the config. `AllowedIPs` and `DNS` are now normalised here as well, and the entered value and the normalised one are logged separately
+- **Repeated `AllowedIPs` and `DNS` lines are no longer lost.** `wg` allows those keys to be given on several lines, and the values add up. The old code glued them into a plainly invalid address, so `awg-quick` refused to bring the interface up and the error was loud. The lines are now joined into one canonical list, and the join itself is reported, so a hand edit cannot disappear unnoticed
+- **`modify` can no longer wipe a setting.** The post-write check required only the `Key = ` prefix, so an empty value passed as success while the backup was deleted. The value must now be non-empty. A separate check makes sure `awg_common.sh` is not older than the script: the version gate between the two halves deliberately tolerates a patch-level drift, the normaliser arrived in exactly such a patch, and on a half-updated server a call to the missing function would have wiped the list of routes
+- **Whitespace inside a list element is cleaned again.** A value like `1.1.1. 1` used to be cleaned by the old `tr` by luck, and trimming edges only would have preserved the typo. Whitespace is now stripped inside the element, the same way the `modify` validator does it
+
+### Clarified
+
+- **The `vpn://` link did not and does not damage this format.** The client config is inlined into it from the file as it is, so a collapsed **embedded config** always has the same cause: a `.conf` damaged by an earlier `regen`. The separate structured `allowed_ips` field is deliberately built from the compact form, because it becomes a JSON array and a space would end up inside its elements. While preparing this release the normalisation was mistakenly applied there as well: on the test server that put a leading space into 33 of the 34 entries. The change was reverted, and both the code and the tests now record why spaces are stripped in that one place
+
+### Added
+
+- `tests/test_allowedips_dns_spacing.bats` (19 checks): the behaviour of the normaliser, three functional `regenerate_client` runs, two functional `manage modify` runs and two decodes of a real `vpn://` link asserting that no array element starts with a space. The earlier revision checked some of these properties by grepping the source, and such a check stayed green when the defect was reintroduced. The expectation in `tests/test_issue170_route_mode_change.bats` was corrected too: it had pinned the collapsed list down as the norm
+
 ## [5.27.0] - 2026-08-14
 
 **v5.27.0** - the installer no longer wipes system packages silently: it prints the list, warns about the snaps and asks for consent, and there is now a dedicated flag to opt out.
@@ -1728,7 +1748,8 @@ Major security and reliability update after several consecutive code audits. The
 - Diagnostic report (`--diagnostic`).
 - Full uninstall (`--uninstall`).
 
-[Unreleased]: https://github.com/bivlked/amneziawg-installer/compare/v5.27.0...HEAD
+[Unreleased]: https://github.com/bivlked/amneziawg-installer/compare/v5.27.1...HEAD
+[5.27.1]: https://github.com/bivlked/amneziawg-installer/compare/v5.27.0...v5.27.1
 [5.27.0]: https://github.com/bivlked/amneziawg-installer/compare/v5.26.0...v5.27.0
 [5.26.0]: https://github.com/bivlked/amneziawg-installer/compare/v5.25.0...v5.26.0
 [5.25.0]: https://github.com/bivlked/amneziawg-installer/compare/v5.24.0...v5.25.0

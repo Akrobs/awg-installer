@@ -8,14 +8,14 @@ fi
 # ==============================================================================
 # Скрипт для управления пользователями (пирами) AmneziaWG 2.0
 # Автор: @bivlked
-# Версия: 5.27.0
-# Дата: 2026-08-14
+# Версия: 5.27.1
+# Дата: 2026-08-22
 # Репозиторий: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
 # --- Безопасный режим и Константы ---
 # shellcheck disable=SC2034
-SCRIPT_VERSION="5.27.0"
+SCRIPT_VERSION="5.27.1"
 set -o pipefail
 AWG_DIR="/root/awg"
 SERVER_CONF_FILE="/etc/amnezia/amneziawg/awg0.conf"
@@ -1111,6 +1111,34 @@ modify_client() {
     fi
     log "Бэкап: $bak"
 
+    # Списочные параметры приводим к каноническому "a, b, c" (D#38): установщик
+    # пишет их с пробелом после запятой, и modify не должен оставлять в конфиге
+    # второй, слипшийся вариант того же значения.
+    #
+    # 🔴 Проверка наличия функции обязательна. _check_common_compat сверяет
+    # только MAJOR.MINOR и осознанно пропускает расхождение в patch, а
+    # awg_normalize_csv появилась в патче 5.27.1. На полуобновлённом сервере
+    # (свежий manage рядом со старой библиотекой) вызов дал бы пустую строку,
+    # и она молча уехала бы в конфиг вместо списка маршрутов.
+    case "$param" in
+        AllowedIPs|DNS)
+            command -v awg_normalize_csv >/dev/null 2>&1 || {
+                log_error "awg_common.sh устарела: нет awg_normalize_csv. Обнови обе половины под одну версию."
+                exec {modify_lock_fd}>&-
+                return 1
+            }
+            local _norm
+            _norm=$(awg_normalize_csv "$value")
+            [[ -n "$_norm" ]] || {
+                log_error "Нормализация '$param' дала пустое значение - правка отменена."
+                exec {modify_lock_fd}>&-
+                return 1
+            }
+            value="$_norm"
+            log "Значение приведено к виду: $value"
+            ;;
+    esac
+
     local escaped_value
     escaped_value=$(escape_sed "$value")
     if ! sed -i "s#^${param}[[:space:]]*=[[:space:]]*.*#${param} = ${escaped_value}#" "$cf"; then
@@ -1121,7 +1149,10 @@ modify_client() {
         exec {modify_lock_fd}>&-
         return 1
     fi
-    if ! grep -q -E "^${param} = " "$cf"; then
+    # Требуем НЕПУСТОЕ значение: префиксная проверка пропускала строку вида
+    # "AllowedIPs = ", то есть обнуление настройки рапортовалось как успех, а
+    # бэкап при этом удалялся.
+    if ! grep -q -E "^${param} = .+" "$cf"; then
         log_error "Замена не выполнена для '$param'. Восстановление..."
         if cp "$bak" "$cf"; then rm -f "$bak"; else log_warn "Ошибка восстановления."; fi
         exec {modify_lock_fd}>&-
