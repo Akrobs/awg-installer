@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [5.27.1] - 2026-08-22
+## [5.27.1] - 2026-08-23
 
 **v5.27.1** - `manage regen` no longer collapses the `AllowedIPs` and `DNS` lists, and configs damaged by earlier versions are repaired by running the same command again.
 
