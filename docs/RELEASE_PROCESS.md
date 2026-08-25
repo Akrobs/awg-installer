@@ -40,7 +40,7 @@ On every release, regardless of which files changed content:
    check, so the pins must be recomputed after the helper scripts are final and
    before the tag is pushed.
 3. Bump the pinned raw-URL tags in `README*.md`, `ADVANCED*.md` and
-   `INSTALL_VPS.md` from the previous `vX.Y.Z` to the new one. Users copy the
+   `INSTALL_VPS*.md` from the previous `vX.Y.Z` to the new one. Users copy the
    install and update one-liners verbatim, so a stale tag silently installs the
    previous release. `check-docs-consistency.sh` (preflight step 9) enforces
    that these tags equal `SCRIPT_VERSION`, but the bump itself is manual.

@@ -42,7 +42,7 @@ sudo bash ./install_amneziawg.sh
 > Что делает: ставит AmneziaWG (модуль ядра через DKMS, какую линию протокола вы получите - в разделе [AmneziaWG 3.x](#awg3)), настраивает firewall и форвардинг, создаёт первого клиента, печатает QR-код и `vpn://` ссылку для импорта в Amnezia Client. Добавить друга или устройство потом - одна команда `add`.
 > 3 команды. 2 перезагрузки по ходу. Около 20 минут до готового VPN. Для чистого Ubuntu/Debian VPS, не роутер и не shared-хостинг. [Подробнее →](#ustanovka)
 
-> 📘 Полный гайд по развёртыванию (EN): [Install AmneziaWG VPN server on Ubuntu/Debian VPS](INSTALL_VPS.md) - выбор VPS, ARM, troubleshooting, удаление.
+> 📘 Полный гайд по развёртыванию: [Установка сервера AmneziaWG на VPS](INSTALL_VPS.ru.md) - выбор VPS, ARM, troubleshooting, удаление. [English version](INSTALL_VPS.md).
 
 > 🔐 Целостность: скрипт качается по HTTPS с `raw.githubusercontent.com` (тег закреплён), вспомогательные скрипты (`awg_common`, `manage`) проверяются по закреплённым SHA256-хешам. Отдельные detached-подписи релизов пока не активны (запланированы) - статус и модель угроз в [SECURITY.md](SECURITY.md).
 
@@ -77,7 +77,7 @@ sudo bash ./install_amneziawg.sh --yes --route-all
 |---|---|
 | Обычный дешёвый VPS, просто нужен VPN | Ничего - команда выше уже всё делает |
 | Мобильный интернет, DPI режет (ТСПУ, Иран, школа или корпоратив) | При установке добавьте `--mobile` - пресет обфускации + порт 443/udp разом ([проверенные операторы](#operatory)) |
-| ARM: Raspberry Pi, Oracle Ampere, Hetzner CAX | Та же команда - готовые ARM-модули ядра выберутся автоматически ([детали](INSTALL_VPS.md)) |
+| ARM: Raspberry Pi, Oracle Ampere, Hetzner CAX | Та же команда - готовые ARM-модули ядра выберутся автоматически ([детали](INSTALL_VPS.ru.md)) |
 | Доступ другу или гостю на время | После установки: `manage_amneziawg.sh add guest --expires=7d` |
 
 ---
