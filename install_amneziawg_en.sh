@@ -1758,6 +1758,15 @@ optimize_swap() {
         # left in a comment).
         if ! awk '!/^[[:space:]]*#/ && $1 == "/swapfile" && $3 == "swap" {found=1} END {exit !(found+0)}' \
              /etc/fstab; then
+            # Make sure the file ends with a newline. Without it our entry
+            # would be glued onto the last fstab line, turning it into a
+            # single malformed record of 11 fields instead of six. Command
+            # substitution strips trailing newlines, so a properly
+            # terminated file yields an empty string and no extra newline
+            # is added.
+            if [[ -s /etc/fstab && -n "$(tail -c1 /etc/fstab)" ]]; then
+                echo >> /etc/fstab
+            fi
             echo '/swapfile none swap sw 0 0' >> /etc/fstab
         fi
         log "Swap file created: ${target_swap_mb}MB"

@@ -12,6 +12,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The swap entry in `/etc/fstab` could be glued onto the preceding line.** `optimize_swap` appended `/swapfile none swap sw 0 0` with `>>` without checking whether the file ended with a newline. When it did not, and some hoster images ship it that way, the entry merged into the last fstab record, and instead of two valid lines the file got a single one of 11 fields instead of six. Worse than the damage itself was how quiet it was: fstab is read on the next boot, so the failure surfaces only after the connection to the server is already gone. The last byte of the file is now checked before writing, and a newline is added when needed. On the stock Ubuntu image the defect did not trigger, because its fstab is properly terminated. Both installer variants fixed
+
+### Added
+
+- `tests/test_fstab_trailing_newline.bats` (9 checks): static ones proving the guard is present in both installer variants, and functional ones that lift that block **out of the shipped script** and run it against a scratch file. A copy of the logic living in the test would have stayed green after the guard was removed from the installer, so there is none.
+
 ## [5.27.1] - 2026-08-23
 
 **v5.27.1** - `manage regen` no longer collapses the `AllowedIPs` and `DNS` lists, and configs damaged by earlier versions are repaired by running the same command again.
