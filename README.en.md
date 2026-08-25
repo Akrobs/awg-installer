@@ -679,7 +679,7 @@ For selectively routing the Russian segment through Cloudflare WARP via a BGP fe
 | Project | Description |
 |---------|-------------|
 | [Junker](https://spatiumstas.github.io/junker/) | AmneziaWG signature generator by @spatiumstas - for manual setup without an installer |
-| [AmneziaWG-Architect](https://vadim-khristenko.github.io/AmneziaWG-Architect/) | CPS/mimicry generator UI for AWG 2.0 by @Vadim-Khristenko ([GitHub](https://github.com/Vadim-Khristenko/AmneziaWG-Architect)) |
+| [Any-Tech-ARCHITECT](https://architect.vai-rice.space/) | Obfuscation parameter generator by @Vadim-Khristenko - value selection and validation with a client compatibility matrix ([GitHub](https://github.com/Vadim-Khristenko/Any-Tech-ARCHITECT)) |
 
 ### Router Firmware
 

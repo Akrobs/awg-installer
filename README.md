@@ -680,7 +680,7 @@ sudo bash /root/awg/manage_amneziawg.sh restart              # Перезапу�
 | Проект | Описание |
 |--------|----------|
 | [Junker](https://spatiumstas.github.io/junker/) | Веб-генератор подписей AmneziaWG от @spatiumstas - для ручной настройки без установочного скрипта |
-| [AmneziaWG-Architect](https://vadim-khristenko.github.io/AmneziaWG-Architect/) | Веб-генератор CPS/мимикрии для AWG 2.0 от @Vadim-Khristenko ([GitHub](https://github.com/Vadim-Khristenko/AmneziaWG-Architect)) |
+| [Any-Tech-ARCHITECT](https://architect.vai-rice.space/) | Веб-генератор параметров обфускации от @Vadim-Khristenko - подбор и проверка значений с матрицей совместимости клиентов ([GitHub](https://github.com/Vadim-Khristenko/Any-Tech-ARCHITECT)) |
 
 ### Прошивки для роутеров
 
