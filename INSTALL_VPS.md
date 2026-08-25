@@ -99,7 +99,7 @@ Per-command output formats and the compatibility promise: [ADVANCED.en.md JSON i
 Updating to a newer installer release on a server that already has a supported version running:
 
 ```bash
-wget -O install_amneziawg_en.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/vX.Y.Z/install_amneziawg_en.sh
+wget -O install_amneziawg_en.sh https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.27.1/install_amneziawg_en.sh
 sudo bash ./install_amneziawg_en.sh --force
 ```
 
