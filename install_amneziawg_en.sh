@@ -2239,19 +2239,94 @@ check_service_status() {
 # Diagnostics
 # ==============================================================================
 
+# The report is meant to be pasted into a PUBLIC issue: our own bug template asks
+# for its contents. Key values are stripped by one shared function rather than by
+# separate masking inside each section: sections get added over time and masking
+# done inside one of them drifts apart from the rest. That is exactly how
+# PresharedKey ended up in the report in clear text while PrivateKey was masked on
+# the line next to it.
+# Applied at TWO points (one implementation, not two sources of truth): at the
+# report boundary and separately to the server config.
+# NOTE: the second point covers the server config ONLY. awg show output and the
+# journal do not pass through it, so those are what would leak if the outer
+# pipeline were ever detached.
+# NOTE: the AWG_ENDPOINT masking further down this function is a deliberate
+# exception to the "one function" rule: it hides an address rather than a key.
+#
+# The expressions are CONTEXT BOUND. An unanchored version stripped a value wherever
+# a key name appeared and damaged unrelated fields: the server name is free text
+# allowing spaces and equals signs, so an AWG_SERVER_NAME line containing the text
+# "PrivateKey = Office" lost both the value and its closing quote. Client names are
+# protected from that by the ^[a-zA-Z0-9_-]+$ validation (which lives in
+# manage_amneziawg.sh and awg_common.sh, not here), but a hand-edited #_Name may
+# contain anything.
+#
+# Four contexts:
+#   1. a configuration line AT START OF LINE, with an optional comment marker. The
+#      marker is needed NOT because awg would parse such a line: it discards it
+#      entirely (config_read_line truncates at the first hash BEFORE parsing). It is
+#      needed because the value physically sits in a file that gets pasted into a
+#      public issue. Masked TO END OF LINE: parsing strips whitespace beforehand, so
+#      a record like "PrivateKey = AA BB=" is valid and cutting at the first space
+#      would have left the tail of the key in the report.
+#   2. an awg show label at start of line. HeaderProtectionKey is mandatory here:
+#      awg show prints it IN CLEAR TEXT (show.c: key() instead of masked_key()),
+#      unlike the private and preshared keys which it hides itself. This also
+#      settles WG_HIDE_KEYS=never.
+#   3. "Line unrecognized: ..." - unanchored. awg prints the line to stderr ALREADY
+#      CLEANED (truncated at the hash, whitespace removed) and wrapped in a backtick
+#      and a quote. Hence the ".?" in the expression: it skips that backtick.
+#      DO NOT REMOVE ".?": without it the real line does not match at all.
+#      The error branch fires on ANY unrecognized line: a typo in a key name, a key
+#      in the wrong section (PrivateKey inside [Peer] goes to stderr in full), a key
+#      from another implementation. A hand-added third-line parameter is one case
+#      among them, not the only one.
+#   4. "Key is not the correct length or format: ..." - same place, but the message
+#      carries NO key name at all, so it cannot be matched by one.
+# NOTE: the anchors on 1 and 2 mean those forms are NOT caught in the Service Status
+# section, where systemctl status adds its own timestamped prefix. The journal
+# section does not suffer from this: journalctl is called there with --output=cat,
+# that is, without a prefix.
+# Case insensitivity (flag I) because config parsing is case insensitive too
+# (strncasecmp).
+#
+# FOUR UPSTREAM STRING LITERALS carry the whole thing: "private key:",
+# "header protection key:", "Line unrecognized:", "Key is not the correct length or
+# format:". Checked against amneziawg-tools ee0f0a9 (src/config.c, src/show.c) on
+# 25 aug 2026. If any of them is reworded upstream the filter silently stops
+# matching, and the tests stay green because they hard-code the same strings.
+# RE-CHECK when bumping amneziawg-tools.
+_mask_report_secrets() {
+    sed -E \
+        -e 's/^([[:space:]]*#?[[:space:]]*(PrivateKey|PresharedKey|HeaderProtectionKey)[[:space:]]*=[[:space:]]*).*/\1[HIDDEN]/I' \
+        -e 's/^([[:space:]]*(private key|preshared key|header protection key)[[:space:]]*:[[:space:]]*).*/\1(hidden)/I' \
+        -e 's/(Line unrecognized:[[:space:]]*.?(PrivateKey|PresharedKey|HeaderProtectionKey)[[:space:]]*=[[:space:]]*).*/\1[HIDDEN]/I' \
+        -e 's/(Key is not the correct length or format:[[:space:]]*).*/\1[HIDDEN]/I'
+}
+
 create_diagnostic_report() {
     # --diagnostic runs BEFORE initialize_setup (home of the main root check):
     # as a regular user every log_msg write into /root/awg fails, the report
     # is not created, and exit 0 would look like a false success.
     if [ "$(id -u)" -ne 0 ]; then die "Run the script as root (sudo bash $0 --diagnostic)."; fi
     log "Creating diagnostics..."
-    local rf
+    local rf _diag_umask
     rf="$AWG_DIR/diag_$(date +%F_%T).txt"
+    # The file is created by redirection BEFORE chmod, so its mode at creation
+    # time comes from the umask. Same idiom as for keys in awg_common.sh: narrow
+    # the permissions up front instead of repairing them afterwards. --diagnostic
+    # runs BEFORE secure_files, so /root/awg may exist with default permissions
+    # and the 0644 window is genuinely reachable.
+    _diag_umask=$(umask); umask 077
     {
         echo "=== AMNEZIAWG 2.0 DIAGNOSTIC REPORT ==="
         echo ""
-        echo "!!! WARNING: This report contains IP addresses, ports and routes."
-        echo "!!! Review and redact private data before posting to public issues."
+        echo "!!! WARNING: PrivateKey, PresharedKey and HeaderProtectionKey values are"
+        echo "!!! stripped wherever they are labelled by name or by an awg show label."
+        echo "!!! What stays in the report: IP addresses, ports, routes, obfuscation"
+        echo "!!! parameters, client names and public keys. The server endpoint is"
+        echo "!!! additionally hidden. Review what of that you do not want to be"
+        echo "!!! public before posting to a public issue."
         echo ""
         echo "Generated: $(date)"
         echo "Hostname: $(hostname)"
@@ -2274,9 +2349,11 @@ create_diagnostic_report() {
         fi
         echo ""
         echo "--- Server Config ($SERVER_CONF_FILE) ---"
-        # Mask private key
+        # Second enforcement point, SAME function: one implementation, two places.
+        # That is not a second source of truth, and if the outer filter is ever
+        # detached from the block, the riskiest raw input stays covered.
         if [[ -f "$SERVER_CONF_FILE" ]]; then
-            sed 's/PrivateKey = .*/PrivateKey = [HIDDEN]/' "$SERVER_CONF_FILE"
+            _mask_report_secrets < "$SERVER_CONF_FILE" || echo "ERROR: could not read or filter $SERVER_CONF_FILE"
         else
             echo "File not found"
         fi
@@ -2367,7 +2444,8 @@ create_diagnostic_report() {
         modinfo amneziawg 2>/dev/null || echo "N/A"
         echo ""
         echo "=== END ==="
-    } > "$rf" || log_error "Report write error."
+    } | _mask_report_secrets > "$rf" || die "Report write error: $rf"
+    umask "$_diag_umask"
     chmod 600 "$rf" || log_warn "Report chmod error."
     log "Report: $rf"
 }
