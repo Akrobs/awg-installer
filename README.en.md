@@ -694,6 +694,7 @@ For selectively routing the Russian segment through Cloudflare WARP via a BGP fe
 |---------|----------|-------------|
 | [amneziawg-manager](https://github.com/rockysys/amneziawg-manager) | macOS | Native GUI that drives the server over SSH via the bundled manage script - no web panel or daemons |
 | [awgram](https://github.com/ekuraev/awgram) | Telegram | Rust bot: add/remove clients, stats, backup - via the bundled manage script |
+| [amneziawg-installer-tg-bot](https://github.com/blindtechnique/amneziawg-installer-tg-bot) | Telegram | Python bot that runs on the server itself: clients by button, guest access with an expiry, stats, backup - via the bundled manage script |
 
 <a id="featured-in"></a>
 <details>

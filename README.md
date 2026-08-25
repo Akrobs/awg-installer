@@ -695,6 +695,7 @@ sudo bash /root/awg/manage_amneziawg.sh restart              # Перезапу�
 |--------|-----------|----------|
 | [amneziawg-manager](https://github.com/rockysys/amneziawg-manager) | macOS | Нативный GUI, управляет сервером по SSH через штатный manage - без веб-панели и демонов |
 | [awgram](https://github.com/ekuraev/awgram) | Telegram | Бот на Rust: добавление/удаление клиентов, статистика, бэкап - через штатный manage |
+| [amneziawg-installer-tg-bot](https://github.com/blindtechnique/amneziawg-installer-tg-bot) | Telegram | Бот на Python, работает на самом сервере: клиенты кнопками, гостевой доступ со сроком, статистика, бэкап - через штатный manage |
 
 <a id="upominaniya"></a>
 <details>
