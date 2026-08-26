@@ -8,18 +8,19 @@ fi
 # ==============================================================================
 # Скрипт для установки и настройки AmneziaWG 2.0 на Ubuntu/Debian серверах
 # Автор: @bivlked
-# Версия: 5.27.1
-# Дата: 2026-08-22
+# Версия: 5.28.0
+# Дата: 2026-08-26
 # Репозиторий: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
 # --- Безопасный режим и Константы ---
 set -o pipefail
 
-SCRIPT_VERSION="5.27.1"
+SCRIPT_VERSION="5.28.0"
 AWG_DIR="/root/awg"
 CONFIG_FILE="$AWG_DIR/awgsetup_cfg.init"
 STATE_FILE="$AWG_DIR/setup_state"
+BOOT_CRITICAL_SNAPSHOT_FILE="$AWG_DIR/boot-critical.pkgs"
 LOG_FILE="$AWG_DIR/install_amneziawg.log"
 KEYS_DIR="$AWG_DIR/keys"
 SERVER_CONF_FILE="/etc/amnezia/amneziawg/awg0.conf"
@@ -33,8 +34,8 @@ MANAGE_SCRIPT_PATH="$AWG_DIR/manage_amneziawg.sh"
 # Проверяются в step5_download_scripts() после curl.
 # Если AWG_BRANCH переопределён (не v$SCRIPT_VERSION), проверка пропускается.
 # Формат: sha256sum output (hex, 64 chars).
-COMMON_SCRIPT_SHA256="b5a8355c17e0836550c3a3a4aab73b052e3c439ac440d409741ba0134df98449"
-MANAGE_SCRIPT_SHA256="a06d856bf496b8b7ea1cba6c2f503400fdff895b830ea9e357d8752d121933c5"
+COMMON_SCRIPT_SHA256="6f03413d27825e0c0abdcaa30512000e8f411ef0645e78b014ecdcb6855f9aa8"
+MANAGE_SCRIPT_SHA256="836ce13c4dd93c116378df0de57534b711eed1aa7e389f6577de063ea7bf394c"
 
 # AmneziaWG 2.0 пин (H0, 31 jul 2026). Upstream влил AmneziaWG 3.0 в default-ветку
 # amneziawg-linux-kernel-module, и PPA переключился на 3.0. Тогда на ядрах старее
@@ -1387,6 +1388,208 @@ _cleanup_package_list() {
     local list="modemmanager networkd-dispatcher unattended-upgrades packagekit udisks2"
     [[ "${OS_ID:-}" == "ubuntu" ]] && list="snapd $list lxd-agent-loader"
     printf '%s' "$list"
+}
+
+# _boot_critical_package_list : пакеты, потеря которых оставляет сервер без
+# загрузки или без сети. Ядро списка пришло из разбора Issue #223: там
+# `apt full-upgrade` на шаге 1 удалил 34 пакета, включая udev, initramfs-tools
+# и netplan.io, после чего сервер перестал грузиться. Без udev не создаётся
+# /dev/disk/by-label, systemd не дожидается разделов, записанных в fstab
+# метками, и уходит в аварийный режим (по умолчанию через 90 секунд ожидания,
+# см. DefaultDeviceTimeoutSec; оба раздела ждались параллельно, а не по
+# очереди). Часть имён добавлена по смыслу, а не по тому инциденту: потеря
+# openssh-server, systemd-resolved или ifupdown отрезает доступ так же надёжно.
+#
+# Как до этого доходит. cleanup_system удаляет свой список, а метапакет
+# ubuntu-server оказывается обратной зависимостью удаляемого и уходит вместе с
+# ним. На образах, где он был единственным manual-корнем, всё висевшее под ним
+# (ubuntu-standard, ubuntu-minimal и их зависимости) получает статус "больше не
+# требуется". Само по себе это ещё не удаление: apt такие пакеты перечисляет и
+# предлагает `apt autoremove`. Но при разрешении зависимостей во время
+# обновления резолвер вправе выбрать удаление вместо обновления, и для пакета,
+# который больше никому не нужен, это дешёвый выбор. В Issue #223 он его и
+# сделал. Решение резолвера мы не воспроизводили: известен исход, а не мотив.
+#
+# ⚠️ Имена ubuntu-server/ubuntu-minimal/ubuntu-standard существуют только в
+# Ubuntu. На Debian той же цепочки нет, и там список работает как обычная
+# страховка: _installed_boot_critical просто не найдёт отсутствующих.
+#
+# ⚠️ Список НЕ равен hold-списку из cleanup_system: тот защищает во время
+# purge, этот - во время обновления. Пересечение есть, назначение разное.
+_boot_critical_package_list() {
+    printf '%s' "udev initramfs-tools openssh-server netplan.io netplan-generator systemd-resolved ifupdown ubuntu-minimal ubuntu-standard"
+}
+
+# _pkg_present : 0, если пакет присутствует в системе в любом рабочем виде.
+# Смотрим на третье поле Status, а не на подстроку "ok installed": сразу после
+# purge или прерванного обновления пакет может стоять как half-configured или
+# unpacked. Для наших целей он присутствует, и защищать его надо.
+_pkg_present() {
+    local state
+    state="$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null | awk '{print $3}')"
+    case "$state" in
+        ""|not-installed|config-files) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# _installed_boot_critical : те из них, что реально стоят в этой системе.
+# Печатает по одному имени в строке; пустой вывод - повод насторожиться,
+# а не нормальная ситуация: udev есть практически на любом сервере.
+_installed_boot_critical() {
+    local critical_list
+    critical_list="$(_boot_critical_package_list)"
+    local pkg
+    for pkg in $critical_list; do
+        if _pkg_present "$pkg"; then
+            printf '%s\n' "$pkg"
+        fi
+    done
+}
+
+# _pkg_installed_ok : 0 только если пакет полностью установлен И настроен.
+# Отличие от _pkg_present намеренное, и оно несимметрично по риску. Для СНИМКА
+# "распакован, но не настроен" - это присутствие: пакет есть, его надо
+# защищать. Для ВЕРДИКТА перед перезагрузкой - нет: initramfs-tools в
+# состоянии unpacked означает, что postinst не отработал и initramfs под новое
+# ядро не собран. Сервер не загрузится, хотя пакет формально "есть".
+_pkg_installed_ok() {
+    # Смотрим ТОЛЬКО третье поле. Полная строка Status это "<желание> <ошибка>
+    # <состояние>", и привязка к "install ok installed" целиком пинит заодно
+    # флаг желания: `apt-mark hold` ставит "hold ok installed", то есть
+    # полностью исправный пакет читался бы как потерянный. Для нас это не
+    # теория - cleanup_system специально бережёт пользовательские hold'ы.
+    # Состояние installed отсекает то, ради чего предикат и заведён:
+    # unpacked, half-configured, half-installed, config-files.
+    [[ "$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null | awk '{print $3}')" == "installed" ]]
+}
+
+# Снимок ПЕРЕЖИВАЕТ перезапуски установщика и умеет только расти.
+#
+# Установщик сам просит запустить себя заново после отказа, а к этому моменту
+# пакет уже может быть удалён: apt способен снести udev и следом упасть, и
+# тогда проверка в конце шага просто не выполнится. Снимок, взятый заново в
+# следующем запуске, удалённого пакета уже не увидит, и проверка сверит
+# систему с обеднённым эталоном - то есть промолчит ровно про то состояние,
+# ради которого написана. Поэтому объединяем с записанным ранее.
+#
+# Из файла берутся ТОЛЬКО известные имена: испорченный или подменённый файл не
+# должен превращаться в список произвольных пакетов для установки.
+_boot_critical_snapshot() {
+    local now stored known union
+    now="$(_installed_boot_critical)"
+    stored=""
+    if [[ -e "$BOOT_CRITICAL_SNAPSHOT_FILE" && ! -r "$BOOT_CRITICAL_SNAPSHOT_FILE" ]]; then
+        # Иначе нечитаемый файл был бы неотличим от отсутствующего: список
+        # молча ужался бы, и функция тут же перезаписала бы им историю, хотя
+        # её договор - только расти.
+        log_warn "Файл $BOOT_CRITICAL_SNAPSHOT_FILE существует, но не читается. Список за прошлые запуски не будет учтён."
+    elif [[ -r "$BOOT_CRITICAL_SNAPSHOT_FILE" ]]; then
+        known="$(_boot_critical_package_list | tr ' ' '\n')"
+        stored="$(grep -Fxf <(printf '%s\n' "$known") "$BOOT_CRITICAL_SNAPSHOT_FILE" 2>/dev/null || true)"
+    fi
+    union="$(printf '%s\n%s\n' "$now" "$stored" | grep -v '^$' | sort -u)"
+    if [[ -n "$union" ]]; then
+        mkdir -p "$AWG_DIR" 2>/dev/null || true
+        printf '%s\n' "$union" > "$BOOT_CRITICAL_SNAPSHOT_FILE" 2>/dev/null \
+            || log_warn "Не удалось сохранить список защищаемых пакетов в $BOOT_CRITICAL_SNAPSHOT_FILE. Проверка переживёт этот запуск, но не следующий."
+    fi
+    printf '%s' "$union"
+}
+
+# _verify_boot_critical : последний рубеж перед перезагрузкой. Принимает снимок,
+# снятый ДО обновления, и сверяет его с состоянием прямо сейчас.
+#
+# Вызов стоит вплотную к request_reboot и не должен от него отрываться. Смысл
+# проверки в том, что после неё не выполняется больше ничего, способного
+# удалить пакет: в шаге 1 между обновлением и перезагрузкой живёт ещё
+# install_packages, а он зовёт apt install без --no-remove. Проверка, стоящая
+# раньше него, оставила бы окно ровно того же класса, который она закрывает.
+#
+# Почему это вообще нужно: apt вправе удалять пакеты ради разрешения
+# зависимостей, и в Issue #223 так ушёл udev - сервер перестал грузиться, а
+# перезагрузку инициируем мы сами. Значит ловить надо здесь, пока доступ к
+# серверу есть: после reboot чинить придётся через консоль хостера.
+_verify_boot_critical() {
+    local critical_before="$1"
+    if [[ -z "$critical_before" ]]; then
+        log_warn "Список защищаемых пакетов пуст, сверять нечего. Это ненормально для Ubuntu и Debian: проверьте dpkg-query -W udev, сервер может не загрузиться после перезагрузки."
+        return 0
+    fi
+    local critical_lost=""
+    local pkg
+    for pkg in $critical_before; do
+        _pkg_installed_ok "$pkg" || critical_lost+="$pkg "
+    done
+    [[ -n "$critical_lost" ]] || return 0
+    critical_lost="${critical_lost% }"
+
+    # Прежде чем винить обновление: неисправный dpkg даёт ровно ту же картину,
+    # и сообщение "пакеты удалены" увело бы разбор не туда.
+    _dpkg_usable || die "dpkg перестал отвечать, состояние пакетов проверить нечем. НЕ ПЕРЕЗАГРУЖАЙТЕ сервер. Выполните: dpkg --configure -a; apt-get check - и запустите установщик снова."
+
+    log_warn "Исчезли пакеты, без которых сервер не загрузится: $critical_lost"
+    log_warn "Восстанавливаю их..."
+    # По одному, а не одной транзакцией: если хотя бы у одного имени нет
+    # кандидата на установку, apt отменяет транзакцию целиком, и не
+    # восстановится ничего, включая пакеты, которые ставятся прекрасно. Этот
+    # урок в проекте уже оплачен: cleanup_system (она определена НИЖЕ по файлу)
+    # ставит netplan.io и netplan-generator по отдельности, потому что на
+    # Debian 12 второго пакета нет и он валит всю транзакцию.
+    # --no-remove: восстановление одного пакета не должно стоить другого.
+    local restore_out restore_rc
+    for pkg in $critical_lost; do
+        restore_out="$(DEBIAN_FRONTEND=noninteractive apt-get install -y --no-remove "$pkg" 2>&1)"
+        restore_rc=$?
+        if [[ "$restore_rc" -eq 0 ]] && _pkg_installed_ok "$pkg"; then
+            log "Восстановлен: $pkg"
+        elif [[ "$restore_rc" -eq 0 ]]; then
+            # apt возвращает ноль и когда решил, что делать нечего. Без этой
+            # ветки журнал противоречил бы сам себе: "Восстановлен", а тремя
+            # строками ниже "Отсутствуют критичные пакеты".
+            log_warn "apt отчитался об успехе, но $pkg по-прежнему не установлен."
+        elif [[ -n "$restore_out" ]]; then
+            # В одну строку: log_msg ставит отметку времени только на первую,
+            # а многострочный ответ ломает формат журнала ровно там, где его
+            # потом будут разбирать.
+            log_warn "Не удалось установить $pkg (код $restore_rc). Ответ apt: $(printf '%s' "$restore_out" | tr '\n' ' ' | tail -c 300)"
+        else
+            log_warn "Не удалось установить $pkg (код $restore_rc), причём apt не выдал ни строки: похоже, команда не запустилась вовсе."
+        fi
+    done
+
+    # Сверяем ВЕСЬ набор, а не только пропавшее. Прямой путь к потере соседа
+    # закрыт флагом --no-remove выше; это страховка на случай, если он
+    # перестанет действовать.
+    local still_lost=""
+    for pkg in $critical_before; do
+        _pkg_installed_ok "$pkg" || still_lost+="$pkg "
+    done
+    if [[ -n "$still_lost" ]]; then
+        still_lost="${still_lost% }"
+        log_error "НЕ ПЕРЕЗАГРУЖАЙТЕ сервер: в текущем состоянии он не загрузится."
+        log_error "Отсутствуют критичные пакеты: $still_lost"
+        log_error "Установите их по одному: sudo apt-get install -y <имя>"
+        log_error "Если apt отказывается ставить из-за удержанных пакетов, снимите удержание: sudo apt-mark unhold <имя>"
+        log_error "Если пакета больше нет в репозиториях (переименован после смены выпуска), уберите его имя из $BOOT_CRITICAL_SNAPSHOT_FILE"
+        die "Останавливаюсь, пока доступ к серверу есть. Разберитесь с перечисленным и запустите установщик снова."
+    fi
+    log "Критичные пакеты восстановлены."
+}
+
+# _boot_critical_guard : снять снимок и проверить его. Обёртка нужна для тех
+# точек, где до неё снимок ещё не брали, то есть для шага 2.
+#
+# ⚠️ Самопроверки стоят ЗДЕСЬ, до присваивания, а не внутри
+# _boot_critical_snapshot, и это принципиально: die внутри подстановки команд
+# завершил бы только подоболочку, скрипт продолжил бы работу с пустым снимком,
+# и фатальная проверка молча превратилась бы в необязательную.
+_boot_critical_guard() {
+    _dpkg_usable || die "dpkg не отвечает, а без него не проверить, переживут ли перезагрузку udev и initramfs-tools (Issue #223). Выполните: dpkg --configure -a; apt-get check - и запустите установщик снова."
+    _pkg_present dpkg || die "Проверить состояние пакетов не удалось (dpkg-query или awk работают не так, как ожидается). Без этого нельзя убедиться, что сервер загрузится (Issue #223)."
+    local snapshot
+    snapshot="$(_boot_critical_snapshot)"
+    _verify_boot_critical "$snapshot"
 }
 
 # _dpkg_usable : 0, если ответам dpkg можно верить.
@@ -3070,6 +3273,7 @@ step1_update_and_optimize() {
         cleanup_system
     fi
 
+
     log "Обновление списка пакетов..."
     apt_update_tolerant || die "Ошибка apt update."
     # Кэш свежий: install_packages ниже не должен гонять apt update повторно
@@ -3082,6 +3286,44 @@ step1_update_and_optimize() {
         DEBIAN_FRONTEND=noninteractive dpkg --configure -a || log_warn "dpkg --configure -a."
     fi
 
+    # Метапакеты, под которыми висят udev, initramfs-tools и сетевой стек,
+    # могли осиротеть: их роняет очистка выше, но точно так же они могут
+    # прийти осиротевшими с самим образом. Поэтому блок выполняется БЕЗУСЛОВНО,
+    # включая --no-tweaks и --keep-packages, когда очистки не было вовсе.
+    # Возвращаем таким пакетам признак manual,
+    # иначе apt full-upgrade ниже вправе выбросить их вместо обновления
+    # (Issue #223). Именно manual, а не hold: hold запретил бы обновление, а
+    # обновлять их как раз надо; manual лишь снимает статус "больше не нужен".
+    # ⚠️ Это уменьшает вероятность, но не запрещает удаление: manual-пакет apt
+    # тоже вправе снести ради разрешения зависимостей. Гарантией служит не эта
+    # разметка, а проверка _verify_boot_critical перед перезагрузкой.
+    #
+    # Блок стоит ПОСЛЕ ремонта dpkg выше, и это не косметика: снимок строится
+    # опросом dpkg. Заблокированная база отвечает нормально, а вот недоступная
+    # или повреждённая даёт пустой ответ на всё сразу, и тогда защита
+    # выключилась бы молча вместе с проверкой после обновления, то есть ровно
+    # на тех машинах, где дефект и срабатывает. Самопроверка ниже ловит и это.
+    _dpkg_usable || die "dpkg не отвечает, а без него не проверить, переживут ли обновление udev и initramfs-tools (Issue #223). Выполните: dpkg --configure -a; apt-get check - и запустите установщик снова."
+    # Самопроверка предиката. _dpkg_usable отвечает только за dpkg, а предикат
+    # опирается ещё и на awk: сломанный awk вернул бы пустой статус, то есть
+    # "отсутствует" сразу для всех, и защита выключилась бы молча.
+    _pkg_present dpkg || die "Проверить состояние пакетов не удалось (dpkg-query или awk работают не так, как ожидается). Без этого нельзя убедиться, что обновление не унесёт udev (Issue #223)."
+    local critical_before
+    critical_before="$(_boot_critical_snapshot)"
+    if [[ -n "$critical_before" ]]; then
+        log "Под защитой от удаления: $(printf '%s' "$critical_before" | tr '\n' ' ')"
+        # udev есть практически на любом сервере Ubuntu и Debian. Его
+        # отсутствие означает не "нечего защищать", а что машина, возможно, уже
+        # повреждена - например, прерванным прошлым запуском.
+        _pkg_installed_ok udev \
+            || log_warn "udev не установлен или не настроен. Для Ubuntu и Debian это ненормально: проверьте dpkg-query -W udev, сервер может не загрузиться."
+        # Без кавычек намеренно: список приходит именами через перевод строки,
+        # и разбиение на аргументы здесь и нужно.
+        apt-mark manual $critical_before >/dev/null 2>&1 \
+            || log_warn "Не удалось вернуть признак manual пакетам: $(printf '%s' "$critical_before" | tr '\n' ' ') - обновление ниже может их удалить, проверка после него это поймает."
+    else
+        log_warn "Ни один пакет из критичного набора не найден установленным. Для Ubuntu и Debian это необычно; проверьте: dpkg-query -W udev"
+    fi
     log "Обновление системы..."
     if ! DEBIAN_FRONTEND=noninteractive apt full-upgrade -y; then
         _lock_holder="$(fuser /var/lib/dpkg/lock-frontend 2>/dev/null | tr -s ' ' || true)"
@@ -3095,6 +3337,7 @@ step1_update_and_optimize() {
     fi
     log "Система обновлена."
 
+
     install_packages curl wget gpg sudo ethtool
 
     if [[ "$NO_TWEAKS" -eq 0 ]]; then
@@ -3106,6 +3349,10 @@ step1_update_and_optimize() {
         log "Пропуск оптимизации и hardening (--no-tweaks)."
         setup_minimal_sysctl
     fi
+
+    # Проверяем ПОСЛЕДНИМ действием шага: после этой строки не выполняется
+    # ничего, что могло бы удалить пакет.
+    _verify_boot_critical "$critical_before"
 
     log "Шаг 1 успешно завершен."
     request_reboot 2
@@ -3593,6 +3840,7 @@ PPASRC
                 log_warn "  затем sudo apt-mark hold amneziawg-dkms, переустановка модуля и перезагрузка."
             fi
             log "Шаг 2 завершен (prebuilt ARM)."
+            _boot_critical_guard
             # request_reboot всегда завершает процесс (exit), сюда не вернёмся.
             request_reboot 3
         fi
@@ -3987,6 +4235,10 @@ AWG_SYSTEMD_UNIT_EOF
         log "DKMS статус OK."
     fi
 
+    # Шаг 2 тоже ставит пакеты и тоже перезагружает машину, значит тот же
+    # рубеж нужен и здесь.
+    _boot_critical_guard
+
     log "Шаг 2 завершен."
     request_reboot 3
 }
@@ -4309,7 +4561,11 @@ step99_finish() {
 
     # Удаление файла состояния
     log "Удаление файла состояния установки..."
-    rm -f "$STATE_FILE" "${STATE_FILE}.lock" "$AWG_DIR/.boot_id_before_step2" || log_warn "Не удалось удалить $STATE_FILE"
+    # Снимок защищаемых пакетов тоже уходит: он нужен между шагами, а пережив
+    # установку, стал бы стареть. Устаревшее имя (пакет переименован сменой
+    # выпуска) останавливало бы следующую установку без внятной причины.
+    rm -f "$STATE_FILE" "${STATE_FILE}.lock" "$AWG_DIR/.boot_id_before_step2" \
+          "$BOOT_CRITICAL_SNAPSHOT_FILE" || log_warn "Не удалось удалить $STATE_FILE"
     log "Установка полностью завершена. Лог: $LOG_FILE"
     log "=============================================================================="
 }
