@@ -8,14 +8,14 @@ fi
 # ==============================================================================
 # AmneziaWG 2.0 installation and configuration script for Ubuntu/Debian servers
 # Author: @bivlked
-# Version: 5.28.0
-# Date: 2026-08-26
+# Version: 5.28.1
+# Date: 2026-08-27
 # Repository: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
 # --- Safe mode and Constants ---
 set -o pipefail
-SCRIPT_VERSION="5.28.0"
+SCRIPT_VERSION="5.28.1"
 
 AWG_DIR="/root/awg"
 CONFIG_FILE="$AWG_DIR/awgsetup_cfg.init"
@@ -34,8 +34,8 @@ MANAGE_SCRIPT_PATH="$AWG_DIR/manage_amneziawg.sh"
 # Verified in step5_download_scripts() after curl.
 # Verification is skipped when AWG_BRANCH is overridden (test branch).
 # Format: sha256sum output (hex, 64 chars).
-COMMON_SCRIPT_SHA256="4e42543fa96d38de1dc41042757f70c9b3f559c7c2047c77c1ad0be6ea7f8bff"
-MANAGE_SCRIPT_SHA256="eba7d24895d9310aa0102662b2c54466bc5d929ac0f8192e14a79069e28b5291"
+COMMON_SCRIPT_SHA256="0a6047ea929524fc159addbd7658142548a1f636599998d33048fa5412c674e7"
+MANAGE_SCRIPT_SHA256="6fe56da424f3e5f2f5c4ad2d43b49f1e4ce40c2ba6e341d0b697f04cc610bb55"
 
 # AmneziaWG 2.0 pin (H0, 31 jul 2026). Upstream merged AmneziaWG 3.0 into the
 # amneziawg-linux-kernel-module default branch, and the PPA switched to it. Back
@@ -376,7 +376,7 @@ request_reboot() {
 
     # Capture boot_id before the 1→2 reboot gate. On step 2 entry we
     # compare it with the current boot_id — if they match, the user did
-    # not reboot, which means apt full-upgrade staged a new kernel on
+    # not reboot, which means the step 1 upgrade may have staged a kernel on
     # disk but the running kernel is still the old one. DKMS would build
     # the module against the old kernel and modprobe would fail after
     # the next reboot. Fail fast instead.
@@ -1409,7 +1409,7 @@ _cleanup_package_list() {
 
 # _boot_critical_package_list : packages whose loss leaves the server unable to
 # boot or unable to reach the network. The core of the list comes from Issue
-# #223: there `apt full-upgrade` in step 1 removed 34 packages, udev,
+# #223: there `apt full-upgrade` in step 1 removed packages including udev,
 # initramfs-tools and netplan.io among them, and the server stopped booting.
 # Without udev there is no /dev/disk/by-label, systemd never sees the partitions
 # that fstab refers to by label, and it drops into emergency mode (after 90
@@ -1553,31 +1553,66 @@ _verify_boot_critical() {
 
     log_warn "Packages the server cannot boot without have disappeared: $critical_lost"
     log_warn "Restoring them..."
-    # One at a time rather than in a single transaction: if even one name has no
-    # installation candidate, apt aborts the whole transaction and nothing is
-    # restored, including the packages that install perfectly well. The project
-    # has paid for this lesson already: cleanup_system (defined FURTHER DOWN the
-    # file) installs netplan.io and netplan-generator separately, because Debian
-    # 12 has no second package and it takes the whole transaction down. --no-remove: restoring one package must not cost us
-    # another.
     local restore_out restore_rc
+
+    # Stage 1: ONE transaction with every lost name at once.
+    # What matters is WHAT becomes a resolver goal. One at a time, `apt-get
+    # install udev` knows nothing about the other lost names: they are not
+    # goals, and apt is free to leave them absent. In one command they all
+    # become goals and apt looks for a version set that suits the group. In
+    # Issue #223 the per-package pass produced five refusals and a single
+    # transaction was never tried, which is the reason to start with it.
+    # ⚠️ Not a guarantee, for two reasons.
+    # First: if the old version is pinned by a package that is NOT in the lost
+    # list (in Issue #223 that was systemd-resolved, with a Depends on exactly
+    # 8.12 of both systemd and libsystemd-shared; the second link there is udev
+    # declaring Breaks on a systemd older than 8.17, and together the two
+    # conditions locked the group), it does not become a goal here either. apt
+    # MAY touch it anyway and sometimes does, but that is its
+    # choice, not an obligation: it prefers to leave non-goal packages alone.
+    # Second: --no-remove aborts the transaction on ANY removal in the plan, not
+    # only on removing something protected. A solution of the form "drop the
+    # package in the way and install the group" is rejected outright.
+    # Hence stage 2 below, and the final verdict from the full-set re-check. The
+    # flag is still needed: restoring one package must not cost another.
+    restore_out="$(DEBIAN_FRONTEND=noninteractive apt-get install -y --no-remove $critical_lost 2>&1)"
+    restore_rc=$?
+    # The wording is cautious on purpose: a zero from apt means "there was
+    # nothing to do" just as much as "done". Whether the packages are back is
+    # decided by stage 2 below and the full-set re-check, not by this line.
+    if [[ "$restore_rc" -eq 0 ]]; then
+        log "The single transaction completed without errors."
+    elif [[ -n "$restore_out" ]]; then
+        log_warn "Single transaction did not work (code $restore_rc), trying one by one. apt said: $(printf '%s' "$restore_out" | tr '\n' ' ' | tail -c 300)"
+    else
+        log_warn "Single transaction did not work (code $restore_rc) and apt produced no output. Trying one by one."
+    fi
+
+    # Stage 2: one at a time, and only for those still missing.
+    # A separate pass is needed because a single name with no installation
+    # candidate aborts the whole transaction, and then nothing is restored,
+    # including packages that install perfectly well. This lesson is already
+    # paid for in this project: cleanup_system (defined BELOW in this file)
+    # installs netplan.io and netplan-generator separately, because on Debian
+    # 12 the latter does not exist and it kills the whole transaction.
     for pkg in $critical_lost; do
+        _pkg_installed_ok "$pkg" && continue
         restore_out="$(DEBIAN_FRONTEND=noninteractive apt-get install -y --no-remove "$pkg" 2>&1)"
         restore_rc=$?
         if [[ "$restore_rc" -eq 0 ]] && _pkg_installed_ok "$pkg"; then
             log "Restored: $pkg"
         elif [[ "$restore_rc" -eq 0 ]]; then
-            # apt also exits zero when it decides there is nothing to do.
+            # apt also returns zero when it decided there was nothing to do.
             # Without this branch the log would contradict itself: "Restored"
-            # three lines above "Boot-critical packages missing".
+            # and three lines below "Boot-critical packages missing".
             log_warn "apt reported success, but $pkg is still not installed."
         elif [[ -n "$restore_out" ]]; then
-            # On one line: log_msg timestamps only the first line, and a
-            # multi-line answer breaks the log format exactly where someone will
-            # later be reading it.
-            log_warn "Could not install $pkg (exit $restore_rc). What apt said: $(printf '%s' "$restore_out" | tr '\n' ' ' | tail -c 300)"
+            # Single line: log_msg timestamps only the first one, and a
+            # multi-line answer breaks the log format exactly where it will
+            # later be parsed.
+            log_warn "Failed to install $pkg (code $restore_rc). apt said: $(printf '%s' "$restore_out" | tr '\n' ' ' | tail -c 300)"
         else
-            log_warn "Could not install $pkg (exit $restore_rc), and apt printed nothing at all: it looks like the command never ran."
+            log_warn "Failed to install $pkg (code $restore_rc) and apt produced no output: the command probably did not run at all."
         fi
     done
 
@@ -1592,12 +1627,102 @@ _verify_boot_critical() {
         still_lost="${still_lost% }"
         log_error "Do NOT reboot the server: in its current state it will not come back."
         log_error "Boot-critical packages missing: $still_lost"
-        log_error "Install them one by one: sudo apt-get install -y <name>"
+        log_error "Try installing them in ONE command, every name at once: sudo apt-get install $still_lost"
+        log_error "One command rather than one at a time: that way apt picks versions for the whole group at once."
+        log_error "No -y on purpose: if apt then wants to REMOVE something, read the list before you confirm. Losing one more of the packages above only makes things worse."
+        log_error "If apt answers that a package not in your command is in the way (of the form 'X : Breaks: Y' or 'X : Depends: Y'), add Y to the same command: in Issue #223 that turned out to be systemd, which is not in the list above."
         log_error "If apt refuses because of held packages, release the hold: sudo apt-mark unhold <name>"
         log_error "If a package is gone from the repositories (renamed by a release upgrade), drop its name from $BOOT_CRITICAL_SNAPSHOT_FILE"
         die "Stopping while the server is still reachable. Deal with the above, then run the installer again."
     fi
     log "Boot-critical packages restored."
+}
+
+
+# _die_upgrade_failed : name the cause of a failed upgrade and stop.
+#
+# Pulled out into its own function for a reason, not for tidiness. While this
+# reasoning lived inline inside step1_update_and_optimize, tests could only
+# check it by grepping the source, and an outside review showed that almost any
+# mutation inside survived the whole suite green: deleting the second lock
+# measurement, inverting the condition, dropping -s, dropping timeout. A test
+# can load a function whole and assert WHICH verdict is printed for WHICH state.
+#
+# The rule of this block: name the cause by evidence, not by guess. The previous
+# version blamed the dpkg lock unconditionally, including when fuser had found
+# nothing, and sent the investigation the wrong way: in Issue #223 the real
+# answer was a resolver refusal.
+_die_upgrade_failed() {
+    local lock_holder apt_why apt_why_rc
+    # Measure AGAIN rather than reusing the sample taken before the retry:
+    # dpkg --configure -a and a whole second apt run happened in between, and
+    # the process found earlier may have exited while a new one appeared.
+    lock_holder="$(fuser /var/lib/dpkg/lock-frontend 2>/dev/null | tr -s ' ' || true)"
+    if [[ -n "$lock_holder" ]]; then
+        die "System update failed and the dpkg lock is held by:${lock_holder}. Wait for those processes to finish or run: systemctl stop unattended-upgrades; dpkg --configure -a - then run the script again."
+    fi
+    # The dry run (-s) asks apt whether a plan resolves. Its refusal usually
+    # means dependencies, but not always: an unparsable sources.list, missing
+    # package lists or a damaged dpkg state fail exactly the same way. So its
+    # answer is QUOTED, not interpreted.
+    # The timeout belongs here, on the fatal path: the real attempts above go
+    # without one deliberately, while hanging here is not acceptable - that SSH
+    # session may be all the user has left. timeout itself is always there,
+    # coreutils is Essential.
+    apt_why="$(timeout 120 env DEBIAN_FRONTEND=noninteractive apt-get upgrade -s --with-new-pkgs 2>&1)"
+    apt_why_rc=$?
+    if [[ "$apt_why_rc" -eq 0 ]]; then
+        die "System update failed, but the dependencies resolve on a re-check, so they are not the cause. Look at the apt output on screen, it is not written to the log file: usually network or mirror, disk space on / or /boot, or the package's own script."
+    fi
+    if [[ -n "$apt_why" ]]; then
+        die "System update failed. The dependency re-check answered: $(printf '%s' "$apt_why" | tr '\n' ' ' | tail -c 400)"
+    fi
+    # Third outcome: the check failed and said nothing. Claiming anything about
+    # dependencies here is exactly how an unknown turns into a confident wrong
+    # diagnosis.
+    die "System update failed, and the dependency re-check did not answer either (code $apt_why_rc, no output; code 124 means it did not finish within 120 seconds). Look at the apt output on screen, it is not written to the log file."
+}
+
+# _warn_kept_back : say out loud that not everything was upgraded.
+# apt-get upgrade leaves a package at its current version when upgrading it
+# would require removing a neighbour, and returns ZERO while doing so. That is
+# the deliberate trade (see the upgrade block in step 1), but staying silent
+# about it is not acceptable: with full-upgrade this outcome was rare (it held
+# back little beyond packages under hold and whatever Ubuntu itself phases),
+# whereas with upgrade it is routine, and without a dedicated line it would pass
+# entirely unnoticed. A warning, not a failure: the server boots either way, but
+# this list is what decides a future investigation.
+#
+# ⚠️ apt gives no machine-readable list of what it held back, so this uses
+# upgradable, which is a SUPERSET: packages under hold and packages stuck on an
+# unresolvable chain land there too. Passing it off as something narrower is not
+# acceptable, and the message below does not.
+_warn_kept_back() {
+    local raw rc kept list
+    raw="$(apt list --upgradable 2>/dev/null)"
+    rc=$?
+    # Take the exit code from apt ITSELF, not from the pipeline: in a pipeline
+    # it comes from awk unless pipefail is set, and then a failing apt reads as
+    # "nothing to upgrade". The branch below decides between silence and a
+    # warning, so it must not rest on a global shell option.
+    if [[ "$rc" -ne 0 ]]; then
+        # A failure of the check itself must not turn into contented silence:
+        # this function exists for diagnosability, so its own failure has to be
+        # audible.
+        log_warn "Could not obtain the list of packages left behind (apt list returned $rc). Check by hand: apt list --upgradable"
+        return 0
+    fi
+    kept="$(printf '%s\n' "$raw" | awk -F/ '/\//{printf "%s ", $1}')"
+    [[ -n "${kept// /}" ]] || return 0
+    list="${kept% }"
+    # Truncation is EXPLICIT and marked: on a server with months of pending
+    # updates this list runs into thousands of characters, and silent truncation
+    # nearby has already been called out as a defect.
+    if [[ "${#list}" -gt 400 ]]; then
+        list="${list:0:400}... (truncated, full list: apt list --upgradable)"
+    fi
+    log "Not every package was upgraded, these stayed at their current versions: $list"
+    log "Most often this means upgrading such a package would have to remove another one, which we deliberately do not do (Issue #223), or that the release is still being phased in. The list is not exhaustive though: packages under hold and packages stuck on unresolvable dependencies show up here too. If the list is not empty and it worries you, look at the reason: apt-get -s upgrade"
 }
 
 # _boot_critical_guard : take the snapshot and verify it. The wrapper exists for
@@ -3330,13 +3455,17 @@ step1_update_and_optimize() {
     # from may have been orphaned: the cleanup above does that, but they can
     # equally arrive orphaned with the image itself. So this block runs
     # UNCONDITIONALLY, --no-tweaks and --keep-packages included, when no cleanup
-    # happened at all. Mark such packages manual again, otherwise apt full-upgrade below is free to drop them instead of
-    # upgrading them (Issue #223). Manual rather than hold on purpose: a hold
-    # would block the upgrade, and upgrading them is exactly what we want;
-    # manual only clears the "no longer required" status.
-    # ⚠️ This lowers the odds, it does not forbid removal: apt may drop a manual
-    # package too while resolving dependencies. The guarantee is not this
-    # marking but the _verify_boot_critical check before the reboot.
+    # happened at all. Mark such packages manual again. The upgrade below can no
+    # longer drop them (the command was changed over Issue #223: apt-get
+    # upgrade has no such right), but the "no longer required" status stays a
+    # trap for later: any subsequent apt operation is free to act on it. Ours
+    # included - install_packages below calls apt install without --no-remove -
+    # and so is any autoremove the user runs afterwards.
+    # Manual rather than hold on purpose: a hold would block the upgrade, and
+    # upgrading them is exactly what we want; manual only clears the status.
+    # ⚠️ The marking guarantees nothing: apt may drop a manual package too while
+    # resolving dependencies. The guarantee is the _verify_boot_critical check
+    # before the reboot.
     #
     # This block sits AFTER the dpkg repair above, and that is not cosmetic: the
     # snapshot is built by asking dpkg. A locked database still answers fine, but
@@ -3362,21 +3491,35 @@ step1_update_and_optimize() {
         # Unquoted on purpose: the list arrives as newline-separated names and
         # splitting it into arguments is exactly what is wanted here.
         apt-mark manual $critical_before >/dev/null 2>&1 \
-            || log_warn "Failed to restore the manual mark on: $(printf '%s' "$critical_before" | tr '\n' ' ') - the upgrade below may remove them, the check after it will catch that."
+            || log_warn "Failed to restore the manual mark on: $(printf '%s' "$critical_before" | tr '\n' ' ') - they stay flagged \"no longer required\", the check before the reboot will catch that."
     else
         log_warn "Not a single boot-critical package was found installed. That is unusual for Ubuntu and Debian; check: dpkg-query -W udev"
     fi
     log "Updating system..."
-    if ! DEBIAN_FRONTEND=noninteractive apt full-upgrade -y; then
+    # Deliberately upgrade --with-new-pkgs rather than full-upgrade. The
+    # difference is not cosmetic: full-upgrade is by definition allowed to
+    # REMOVE installed packages to resolve dependencies, and in Issue #223 it
+    # used that right - it took udev away and the server stopped booting.
+    # upgrade has no such right at all: a package that cannot be upgraded
+    # without removing a neighbour is simply left at its current version.
+    # --with-new-pkgs keeps the only reason full-upgrade was needed here: a new
+    # kernel arrives as a package with a NEW name
+    # (linux-image-6.8.0-NNN-generic), and a plain upgrade refuses to install
+    # new names.
+    # The trade is deliberate: a VPN server does not need systemd to be the
+    # freshest, it needs the machine to boot. The pre-reboot verification below
+    # stays as the second line of defence.
+    if ! DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs; then
+        local _lock_holder
         _lock_holder="$(fuser /var/lib/dpkg/lock-frontend 2>/dev/null | tr -s ' ' || true)"
         if [[ -n "$_lock_holder" ]]; then
             log_warn "dpkg-lock is held by:${_lock_holder} (usually first-boot unattended-upgrades)."
         fi
-        log_warn "apt full-upgrade failed, fixing dpkg and retrying..."
+        log_warn "Update failed, fixing dpkg and retrying..."
         DEBIAN_FRONTEND=noninteractive dpkg --configure -a || true
-        DEBIAN_FRONTEND=noninteractive apt full-upgrade -y \
-            || die "apt full-upgrade error. Another apt/unattended-upgrades process is likely holding the dpkg lock. Wait for it to finish (check: fuser /var/lib/dpkg/lock-frontend) or run: systemctl stop unattended-upgrades; dpkg --configure -a - then run the script again."
+        DEBIAN_FRONTEND=noninteractive apt-get upgrade -y --with-new-pkgs || _die_upgrade_failed
     fi
+    _warn_kept_back
     log "System updated."
 
 
@@ -3580,8 +3723,8 @@ step2_install_amnezia() {
 
     # Guard: make sure the user actually rebooted before step 2.
     # If boot_id matches the one saved in request_reboot 2 — the reboot
-    # did not happen (e.g. user re-ran the script by mistake). Step 1's
-    # apt full-upgrade staged a new kernel on disk, but the running
+    # did not happen (e.g. user re-ran the script by mistake). The step 1
+    # upgrade may have staged a new kernel on disk, but the running
     # kernel is still the old one → DKMS would build the module against
     # the old kernel and modprobe would fail after the next reboot.
     local boot_id_file="$AWG_DIR/.boot_id_before_step2"

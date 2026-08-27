@@ -5,9 +5,12 @@
 # meta-package goes along as a reverse dependency of what is removed. On images
 # where it was the only manual root, udev, initramfs-tools, netplan.io and
 # everything else hanging under it become "no longer required". The
-# `apt full-upgrade` that runs shortly afterwards is then free to drop such a
-# package while resolving the upgrade, and on a system with months of pending
-# updates that is what happened: 34 packages removed, udev among them. Without
+# `apt full-upgrade` that used to run shortly afterwards was then free to
+# drop such a package while resolving the upgrade, and on a system with months
+# of pending updates that is what happened: a batch of packages removed, udev
+# among them. Since v5.28.1 step 1 upgrades with `apt-get upgrade --with-new-pkgs`,
+# which has no right to remove an installed package at all, and the guards
+# below are the second line of defence rather than the only one. Without
 # udev there is no /dev/disk/by-label, systemd never sees the partitions fstab
 # refers to by label, and the server drops into emergency mode on the reboot
 # that step 1 itself triggers. The user is left with an unreachable server.
@@ -160,7 +163,7 @@ line_of() {
     for f in "$(RU_INSTALL)" "$(EN_INSTALL)"; do
         local mark upgrade
         mark=$(line_of "$f" 'apt-mark manual \$critical_before')
-        upgrade=$(line_of "$f" 'apt full-upgrade -y')
+        upgrade=$(line_of "$f" 'apt-get upgrade -y --with-new-pkgs')
         [ -n "$mark" ] && [ -n "$upgrade" ]
         [ "$mark" -lt "$upgrade" ]
     done
@@ -258,16 +261,279 @@ line_of() {
     done
 }
 
-@test "boot-critical: the restore runs per package, not as one transaction" {
-    # apt aborts the whole transaction when a single name has no candidate, so a
-    # one-shot install would restore nothing at all - the lesson cleanup_system
-    # already paid for on netplan-generator.
+@test "boot-critical: the restore tries one transaction first, then per package" {
+    # Both stages are load-bearing and the ORDER is the point.
+    # One transaction first because it decides WHAT the resolver treats as a
+    # goal: one at a time, the other lost names are not goals and apt may leave
+    # them absent. That is how the restore failed in Issue #223 even though the
+    # guard fired.
+    # Per package after: a single name with no candidate aborts a whole
+    # transaction and would restore nothing - the lesson cleanup_system already
+    # paid for on netplan-generator.
     for f in "$(RU_INSTALL)" "$(EN_INSTALL)"; do
-        local block
+        local block bulk loop
         block=$(extract_func "$f" _verify_boot_critical)
-        echo "$block" | grep -q 'for pkg in \$critical_lost'
+        bulk=$(echo "$block" | grep -n -m1 'apt-get install -y --no-remove \$critical_lost' | cut -d: -f1)
+        loop=$(echo "$block" | grep -n -m1 'for pkg in \$critical_lost' | cut -d: -f1)
+        [ -n "$bulk" ] && [ -n "$loop" ]
+        [ "$bulk" -lt "$loop" ]
         echo "$block" | grep -q 'apt-get install -y --no-remove "\$pkg"'
+        # The per-package pass must skip what the bulk call already restored,
+        # otherwise apt is invoked a second time for every name for nothing.
+        echo "$block" | grep -q '_pkg_installed_ok "\$pkg" && continue'
     done
+}
+
+@test "boot-critical: step 1 upgrades only in the form that cannot remove" {
+    # The regression guard for Issue #223. The first version of this test named
+    # the FORBIDDEN command and a review defeated it in one line: dist-upgrade
+    # is full-upgrade under another spelling and contains none of its letters.
+    # A blocklist cannot win that race, so assert the ALLOWED shape instead -
+    # every live apt upgrade invocation in this function must be the same safe
+    # one, and anything else, however spelled, shows up as an extra entry.
+    for f in "$(RU_INSTALL)" "$(EN_INSTALL)"; do
+        local body live n line call
+        body=$(extract_func "$f" step1_update_and_optimize)
+        [ -n "$body" ]
+        live=$(echo "$body" | grep -vE '^[[:space:]]*#')
+        # Assert the WHOLE invocation, not just the verb. Two earlier versions
+        # of this test were defeated: one named the forbidden command and lost
+        # to `dist-upgrade`; the next matched only the verb and lost to `-f`
+        # appended at the end, which restores the right to remove while the
+        # verb stays `apt-get upgrade`. So every live upgrade call must be one
+        # of exactly two allowed strings, flags included.
+        n=0
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            n=$((n + 1))
+            call=$(echo "$line" | grep -oE 'apt(-get)?( +-{1,2}[a-zA-Z-]+)* +[a-z-]*upgrade[a-z-]*( +-{1,2}[a-zA-Z-]+)*')
+            case "$call" in
+                "apt-get upgrade -y --with-new-pkgs") ;;
+                "apt-get upgrade -s --with-new-pkgs") ;;
+                *)
+                    echo "unexpected upgrade invocation: [$call] in: $line" >&2
+                    return 1
+                    ;;
+            esac
+        done < <(echo "$live" | grep -E 'apt(-get)?( +-{1,2}[a-zA-Z-]+)* +[a-z-]*upgrade')
+        [ "$n" -ge 2 ]
+        # And nothing else in this function may remove packages. The regex
+        # above only sees upgrade verbs, so a plain `apt-get autoremove` added
+        # here would be invisible to it - and autoremove is exactly what made
+        # udev disposable in Issue #223 in the first place.
+        if echo "$live" | grep -qE 'apt(-get)? +(-[^ ]+ +)*(autoremove|remove|purge)'; then
+            echo "a package-removing apt call appeared in step 1" >&2
+            return 1
+        fi
+    done
+}
+
+@test "boot-critical: the upgrade-failure verdict lives in its own function" {
+    # Structural, and it is the enabling condition for the seven behavioural
+    # tests below (six on the RU installer plus the EN twin). While this reasoning was inline inside step 1, the suite
+    # could only grep it, and a review demonstrated that deleting the second
+    # lock measurement, inverting the condition, dropping -s or dropping the
+    # timeout all survived 52/52 green.
+    for f in "$(RU_INSTALL)" "$(EN_INSTALL)"; do
+        local body
+        body=$(extract_func "$f" step1_update_and_optimize)
+        echo "$body" | grep -q '|| _die_upgrade_failed'
+        [ -n "$(extract_func "$f" _die_upgrade_failed)" ]
+    done
+}
+
+@test "boot-critical: a busy dpkg lock is named only when a holder is present" {
+    load_upgrade_failure "$(RU_INSTALL)"
+    setup_stubs
+    fuser() { echo " 1234 5678"; return 0; }
+    timeout() { echo "$*" > "$BATS_TEST_TMPDIR/dryrun-args"; return 0; }
+    run _die_upgrade_failed
+    [ "$status" -eq 42 ]
+    echo "$output" | grep -q "1234"
+    echo "$output" | grep -q "dpkg-lock"
+    # The dry run must not even be reached: the cause is already known.
+    # The stub above is what makes this assertion mean anything. Without it
+    # nobody writes dryrun-args, so the file is absent whether the dry run ran
+    # or not, and the check passes for the wrong reason - which is exactly how
+    # it behaved before a review pointed it out.
+    [ ! -f "$BATS_TEST_TMPDIR/dryrun-args" ]
+}
+
+@test "boot-critical: the lock is measured again, not reused from before" {
+    # The value sampled before the retry is stale: dpkg --configure -a and a
+    # whole second apt run happen in between. Deleting the second measurement
+    # kept the old test green, so assert the function calls fuser itself.
+    load_upgrade_failure "$(RU_INSTALL)"
+    setup_stubs
+    fuser() { echo "called" >> "$BATS_TEST_TMPDIR/fuser-calls"; return 1; }
+    timeout() { return 0; }
+    run _die_upgrade_failed
+    [ "$status" -eq 42 ]
+    [ "$(grep -c . "$BATS_TEST_TMPDIR/fuser-calls")" -ge 1 ]
+}
+
+@test "boot-critical: a successful dry run is not passed off as the cause" {
+    load_upgrade_failure "$(RU_INSTALL)"
+    setup_stubs
+    fuser() { return 1; }
+    # Succeeds and prints an ordinary happy plan.
+    timeout() { echo "0 upgraded, 0 newly installed, 0 to remove"; return 0; }
+    run _die_upgrade_failed
+    [ "$status" -eq 42 ]
+    # The happy output must NOT be quoted as the reason.
+    [ "$(echo "$output" | grep -c "0 upgraded")" -eq 0 ]
+    # And the lock must not be blamed either. Absence alone is escapable by
+    # rewording, so pin the correct verdict positively as well.
+    [ "$(echo "$output" | grep -ci "dpkg-lock\|dpkg lock")" -eq 0 ]
+    echo "$output" | grep -q "сходятся"
+}
+
+@test "boot-critical: a failing dry run reaches the user with apt's own words" {
+    load_upgrade_failure "$(RU_INSTALL)"
+    setup_stubs
+    fuser() { return 1; }
+    timeout() { echo "netplan.io : Depends: udev but it is not going to be installed"; return 100; }
+    run _die_upgrade_failed
+    [ "$status" -eq 42 ]
+    echo "$output" | grep -q "Depends: udev"
+}
+
+@test "boot-critical: a dry run that fails silently is reported as unknown" {
+    # rc != 0 with no output means the check did not answer. Claiming
+    # dependencies resolve here would be the very defect this file exists to
+    # prevent, one level deeper.
+    load_upgrade_failure "$(RU_INSTALL)"
+    setup_stubs
+    fuser() { return 1; }
+    timeout() { return 124; }
+    run _die_upgrade_failed
+    [ "$status" -eq 42 ]
+    echo "$output" | grep -q "124"
+    # Must not assert that dependencies are fine.
+    [ "$(echo "$output" | grep -ci "сходятся\|resolve")" -eq 0 ]
+    # Positive pin: the verdict has to say the check itself gave no answer.
+    echo "$output" | grep -q "не ответила"
+}
+
+@test "boot-critical: the diagnosis is a simulation under a timeout" {
+    # -s keeps it from becoming a third real upgrade on the fatal path, and the
+    # timeout keeps the installer from hanging when the user's only remaining
+    # access is that SSH session. Both were droppable without any test noticing.
+    load_upgrade_failure "$(RU_INSTALL)"
+    setup_stubs
+    fuser() { return 1; }
+    timeout() { echo "$*" > "$BATS_TEST_TMPDIR/dryrun-args"; return 0; }
+    run _die_upgrade_failed
+    [ "$status" -eq 42 ]
+    grep -q -- "-s" "$BATS_TEST_TMPDIR/dryrun-args"
+    grep -qE "^12[0-9] " "$BATS_TEST_TMPDIR/dryrun-args"
+}
+
+@test "boot-critical: the report of packages left behind is wired into step 1" {
+    # Structural, and it exists because a review pointed out that this function
+    # could be deleted whole, or its call dropped, with the entire suite staying
+    # green. That is the same hole the six behavioural tests above were written
+    # to close for the other new function.
+    for f in "$(RU_INSTALL)" "$(EN_INSTALL)"; do
+        local body live upgrade kept install
+        body=$(extract_func "$f" step1_update_and_optimize)
+        [ -n "$(extract_func "$f" _warn_kept_back)" ]
+        # Comments only, please: the first version of this test matched a
+        # comment that merely mentions install_packages and concluded the order
+        # was wrong. Strip comments before looking for calls.
+        live=$(echo "$body" | grep -vE '^[[:space:]]*#')
+        upgrade=$(echo "$live" | grep -n -m1 '|| _die_upgrade_failed' | cut -d: -f1)
+        kept=$(echo "$live" | grep -n -m1 '^    _warn_kept_back$' | cut -d: -f1)
+        install=$(echo "$live" | grep -n -m1 '^    install_packages ' | cut -d: -f1)
+        [ -n "$upgrade" ] && [ -n "$kept" ] && [ -n "$install" ]
+        # After the upgrade, and BEFORE install_packages: the list has to
+        # describe the state right after the upgrade, not after later additions.
+        [ "$upgrade" -lt "$kept" ]
+        [ "$kept" -lt "$install" ]
+    done
+}
+
+@test "boot-critical: packages left behind are named" {
+    load_kept_back "$(RU_INSTALL)"
+    setup_stubs
+    apt() {
+        echo "Listing..."
+        echo "byobu/noble-updates 6.11-0ubuntu1.1 all [upgradable from: 6.11-0ubuntu1]"
+        echo "systemd/noble-updates 255.4-1ubuntu8.17 amd64 [upgradable from: 255.4-1ubuntu8.12]"
+        return 0
+    }
+    run _warn_kept_back
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "byobu"
+    echo "$output" | grep -q "systemd"
+    # The header line carries no slash and must not be mistaken for a package.
+    [ "$(echo "$output" | grep -c "Listing")" -eq 0 ]
+}
+
+@test "boot-critical: nothing left behind means nothing printed" {
+    load_kept_back "$(RU_INSTALL)"
+    setup_stubs
+    apt() { echo "Listing..."; return 0; }
+    run _warn_kept_back
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "boot-critical: a failing apt is not reported as nothing left behind" {
+    # The function exists for diagnosability, so its own failure has to be
+    # audible. Swallowing it would be the loud-failure-turned-silent class, one
+    # level below the defect this release is about.
+    load_kept_back "$(RU_INSTALL)"
+    setup_stubs
+    apt() { return 100; }
+    run _warn_kept_back
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "100"
+    # And it must not claim that everything was upgraded.
+    [ "$(echo "$output" | grep -c "остались")" -eq 0 ]
+}
+
+@test "boot-critical: a very long list is truncated, and says so" {
+    load_kept_back "$(RU_INSTALL)"
+    setup_stubs
+    apt() {
+        echo "Listing..."
+        local i
+        for i in $(seq 1 200); do
+            echo "package-with-a-longish-name-$i/noble 1.0 amd64 [upgradable from: 0.9]"
+        done
+        return 0
+    }
+    run _warn_kept_back
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "обрезано"
+    # Truncation is marked rather than silent: the reader must be able to tell
+    # a short list from a cut one.
+    echo "$output" | grep -q "apt list --upgradable"
+}
+
+@test "boot-critical (EN): packages left behind are named" {
+    load_kept_back "$(EN_INSTALL)"
+    setup_stubs
+    apt() {
+        echo "Listing..."
+        echo "byobu/noble-updates 6.11-0ubuntu1.1 all [upgradable from: 6.11-0ubuntu1]"
+        return 0
+    }
+    run _warn_kept_back
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "byobu"
+}
+
+@test "boot-critical (EN): the upgrade-failure verdict behaves the same" {
+    load_upgrade_failure "$(EN_INSTALL)"
+    setup_stubs
+    fuser() { return 1; }
+    timeout() { return 124; }
+    run _die_upgrade_failed
+    [ "$status" -eq 42 ]
+    echo "$output" | grep -q "124"
+    [ "$(echo "$output" | grep -ci "resolve")" -eq 0 ]
 }
 
 @test "boot-critical: the final check covers the whole set" {
@@ -432,6 +698,14 @@ load_verifier() {
     eval "$(extract_func "$1" _verify_boot_critical)"
 }
 
+load_upgrade_failure() {
+    eval "$(extract_func "$1" _die_upgrade_failed)"
+}
+
+load_kept_back() {
+    eval "$(extract_func "$1" _warn_kept_back)"
+}
+
 load_snapshot() {
     eval "$(extract_func "$1" _boot_critical_package_list)"
     eval "$(extract_func "$1" _pkg_present)"
@@ -488,18 +762,118 @@ setup_stubs() {
     [ "$(echo "$output" | grep -c "DIE")" -eq 0 ]
 }
 
-@test "boot-critical: the restore asks apt for one package with --no-remove" {
+@test "boot-critical: the restore asks apt for the whole set, then per package" {
     load_verifier "$(RU_INSTALL)"
     setup_stubs
     dpkg-query() { return 1; }
     run _verify_boot_critical "udev initramfs-tools"
     [ "$status" -eq 42 ]
-    # Two separate invocations, each naming exactly one package.
-    [ "$(grep -c . "$BATS_TEST_TMPDIR/apt-args")" -eq 2 ]
+    # Three invocations: one naming both packages, then one per package because
+    # the stubbed dpkg-query keeps reporting them missing.
+    [ "$(grep -c . "$BATS_TEST_TMPDIR/apt-args")" -eq 3 ]
+    # The bulk call comes FIRST. Order is the whole point of the two stages:
+    # co-dependent packages only converge when every name is a resolver goal.
+    head -1 "$BATS_TEST_TMPDIR/apt-args" | grep -qx "noninteractive install -y --no-remove udev initramfs-tools"
     # The environment prefix is recorded too: a conffile prompt in an unattended
     # run would block the installer at the worst possible moment.
     grep -qx "noninteractive install -y --no-remove udev" "$BATS_TEST_TMPDIR/apt-args"
     grep -qx "noninteractive install -y --no-remove initramfs-tools" "$BATS_TEST_TMPDIR/apt-args"
+}
+
+@test "boot-critical: the per-package pass skips what the bulk call restored" {
+    load_verifier "$(RU_INSTALL)"
+    setup_stubs
+    # udev comes back after the bulk call, initramfs-tools does not. Without the
+    # skip, udev would be reinstalled a second time for nothing.
+    dpkg-query() {
+        local want="${!#}"
+        if [[ "$want" == "udev" && -f "$BATS_TEST_TMPDIR/bulk-done" ]]; then
+            echo "install ok installed"
+            return 0
+        fi
+        return 1
+    }
+    apt-get() {
+        echo "${DEBIAN_FRONTEND:-UNSET} $*" >> "$BATS_TEST_TMPDIR/apt-args"
+        touch "$BATS_TEST_TMPDIR/bulk-done"
+        return 0
+    }
+    run _verify_boot_critical "udev initramfs-tools"
+    [ "$status" -eq 42 ]
+    # Bulk call plus one per-package call for initramfs-tools only.
+    [ "$(grep -c . "$BATS_TEST_TMPDIR/apt-args")" -eq 2 ]
+    [ "$(grep -c "no-remove udev$" "$BATS_TEST_TMPDIR/apt-args")" -eq 0 ]
+    grep -qx "noninteractive install -y --no-remove initramfs-tools" "$BATS_TEST_TMPDIR/apt-args"
+}
+
+@test "boot-critical (EN): the restore asks apt for the whole set, then per package" {
+    # The two behavioural tests above load the Russian installer. The English
+    # one is a separate file, not a translation layer, so a repair that regressed
+    # only there would stay green on every RU-only assertion.
+    load_verifier "$(EN_INSTALL)"
+    setup_stubs
+    dpkg-query() { return 1; }
+    run _verify_boot_critical "udev initramfs-tools"
+    [ "$status" -eq 42 ]
+    [ "$(grep -c . "$BATS_TEST_TMPDIR/apt-args")" -eq 3 ]
+    head -1 "$BATS_TEST_TMPDIR/apt-args" | grep -qx "noninteractive install -y --no-remove udev initramfs-tools"
+    # The environment prefix matters here as much as in the RU twin: without it
+    # an unattended run stops at a conffile prompt. Losing it in the EN file
+    # only used to go unnoticed, because this twin checked less than its
+    # original.
+    grep -qx "noninteractive install -y --no-remove udev" "$BATS_TEST_TMPDIR/apt-args"
+    grep -qx "noninteractive install -y --no-remove initramfs-tools" "$BATS_TEST_TMPDIR/apt-args"
+}
+
+@test "boot-critical (EN): the per-package pass skips what the bulk call restored" {
+    load_verifier "$(EN_INSTALL)"
+    setup_stubs
+    dpkg-query() {
+        local want="${!#}"
+        if [[ "$want" == "udev" && -f "$BATS_TEST_TMPDIR/bulk-done" ]]; then
+            echo "install ok installed"
+            return 0
+        fi
+        return 1
+    }
+    apt-get() {
+        echo "${DEBIAN_FRONTEND:-UNSET} $*" >> "$BATS_TEST_TMPDIR/apt-args"
+        touch "$BATS_TEST_TMPDIR/bulk-done"
+        return 0
+    }
+    run _verify_boot_critical "udev initramfs-tools"
+    [ "$status" -eq 42 ]
+    [ "$(grep -c . "$BATS_TEST_TMPDIR/apt-args")" -eq 2 ]
+    [ "$(grep -c "no-remove udev$" "$BATS_TEST_TMPDIR/apt-args")" -eq 0 ]
+    grep -qx "noninteractive install -y --no-remove initramfs-tools" "$BATS_TEST_TMPDIR/apt-args"
+}
+
+@test "boot-critical: a failed bulk transaction is reported, then retried per package" {
+    # The per-package branch on a failing apt was already covered elsewhere in
+    # this file; the BULK stage was not. Its failure branch carries the same
+    # truncation and single-line collapse the comments there call
+    # format-critical, and until this test nothing exercised it.
+    load_verifier "$(RU_INSTALL)"
+    setup_stubs
+    dpkg-query() { return 1; }
+    apt-get() {
+        echo "${DEBIAN_FRONTEND:-UNSET} $*" >> "$BATS_TEST_TMPDIR/apt-args"
+        # Only the bulk call fails; the per-package calls succeed but change
+        # nothing, which is the realistic shape of the Issue #223 failure.
+        case "$*" in
+            *"udev initramfs-tools"*) echo "E: Unable to correct problems"; return 100 ;;
+        esac
+        return 0
+    }
+    run _verify_boot_critical "udev initramfs-tools"
+    [ "$status" -eq 42 ]
+    # The failure is announced with apt's own words, and on ONE line: log_msg
+    # timestamps only the first line, so a multi-line answer breaks the log
+    # format exactly where it will later be parsed.
+    echo "$output" | grep -q "Unable to correct problems"
+    [ "$(echo "$output" | grep -c "Одной транзакцией не вышло")" -eq 1 ]
+    # And the per-package pass still ran for both names.
+    [ "$(grep -c . "$BATS_TEST_TMPDIR/apt-args")" -eq 3 ]
 }
 
 @test "boot-critical: verification reports every lost package, not just the first" {
