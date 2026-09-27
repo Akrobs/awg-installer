@@ -448,6 +448,11 @@ _aip_wants_v6_sink() {
 #
 # Idempotence is mandatory: regen runs repeatedly, including over a dual-stack
 # client whose IPv6 part has already been built.
+#
+# CLIENT_IPV6_DIRECT=1 (installer flag --client-ipv6-direct) leaves a mode-2
+# list with IPv4 only: the device's IPv6 goes directly, around the tunnel
+# (PR #260). 0.0.0.0/0 keeps its ::/0 even with the key: without it iOS
+# AmneziaVPN does not bring the tunnel up, and the installer refuses that mix.
 _append_ipv6_full_tunnel_route() {
     local list="$1"
     # The decision is taken on a normalised copy, so the normalised copy is what
@@ -463,6 +468,8 @@ _append_ipv6_full_tunnel_route() {
         if _is_full_tunnel "$list"; then
             if _aip_has_token "$list" "0.0.0.0/0"; then
                 printf '%s, ::/0' "$list"
+            elif _aip_direct_applies "$list"; then
+                printf '%s' "$list"
             else
                 printf '%s, 2000::/3' "$list"
             fi
@@ -472,6 +479,68 @@ _append_ipv6_full_tunnel_route() {
         return 0
     fi
     printf '%s' "$list"
+}
+
+# _client_ipv6_direct : whether CLIENT_IPV6_DIRECT is on (client IPv6 directly).
+# 0 or 1. Any other value is named and read as 0: the route stays, so a typo in
+# the key does not let IPv6 go around the tunnel silently.
+_client_ipv6_direct() {
+    case "${CLIENT_IPV6_DIRECT:-0}" in
+        1) return 0 ;;
+        0) return 1 ;;
+        *)
+            log_warn "CLIENT_IPV6_DIRECT='${CLIENT_IPV6_DIRECT}' in ${CONFIG_FILE:-awgsetup_cfg.init} is not valid (use 0 or 1) - keeping the IPv6 route for clients."
+            return 1
+            ;;
+    esac
+}
+
+# _aip_same_set <list> <list> : the same set of routes (order and spaces do
+# not matter). An empty list matches nothing.
+_aip_same_set() {
+    local a b
+    a=$(_aip_tokens "$1" | LC_ALL=C sort -u) || return 1
+    b=$(_aip_tokens "$2" | LC_ALL=C sort -u) || return 1
+    [[ -n "$a" && "$a" == "$b" ]]
+}
+
+# _aip_direct_applies <list> : CLIENT_IPV6_DIRECT covers this list - the server
+# is in mode 2, the list equals its list, and the key is on. Mode 3 and a full
+# tunnel written by hand (--allowed-ips, modify) are left alone: the key is
+# about the mode the server chose, not about any list of that shape.
+_aip_direct_applies() {
+    [[ "${ALLOWED_IPS_MODE:-}" == "2" ]] || return 1
+    _aip_same_set "$1" "${ALLOWED_IPS:-}" || return 1
+    _client_ipv6_direct
+}
+
+# _aip_drop_our_v6 <client list> <server list> : with CLIENT_IPV6_DIRECT=1
+# prints the list without OUR IPv6 route, otherwise the list as is. Ours is
+# exactly one IPv6 element, 2000::/3 (since v5.36.2) or ::/0 (v5.31.0-v5.36.1),
+# next to an IPv4 part that equals the server list as a set of routes, while the
+# server list is a full tunnel without 0.0.0.0/0 (mode 2). Anything else is the
+# user's choice (--allowed-ips, modify) and regen leaves it alone. The order of
+# the IPv4 part is kept.
+_aip_drop_our_v6() {
+    local list="$1" base="$2" toks v6 mine srv tok out="" rc
+    toks=$(_aip_tokens "$list") || return 1
+    # Code 1 from grep is "no lines", an answer; 2 and above is a failure.
+    v6=$(grep -F ':' <<< "$toks"); rc=$?
+    (( rc > 1 )) && return 1
+    if [[ ( "$v6" != "::/0" && "$v6" != "2000::/3" ) || -z "$base" || "$base" == *:* ]] \
+       || _aip_has_token "$base" "0.0.0.0/0" || ! _is_full_tunnel "$base"; then
+        printf '%s' "$list"
+        return 0
+    fi
+    mine=$(grep -vF ':' <<< "$toks"); rc=$?
+    (( rc > 1 )) && return 1
+    [[ -n "$mine" ]] || { printf '%s' "$list"; return 0; }
+    srv=$(_aip_tokens "$base" | LC_ALL=C sort -u) || return 1
+    [[ "$(LC_ALL=C sort -u <<< "$mine")" == "$srv" ]] || { printf '%s' "$list"; return 0; }
+    while IFS= read -r tok; do
+        out+="${out:+, }${tok}"
+    done <<< "$mine"
+    printf '%s' "$out"
 }
 
 # _aip_migrate_legacy_v6 <client list> <server list> : prints the list with our
@@ -1192,10 +1261,10 @@ ensure_amneziawg_kernel_module() {
 # Parses only allowed keys in KEY=VALUE or export KEY=VALUE format
 safe_load_config() {
     local config_file="${1:-$CONFIG_FILE}"
-    # CLIENT_DNS lives only in the file: without this reset a variable from root's
-    # environment (CLIENT_DNS=... manage add) would silently reach new clients on
-    # installs whose file has no such line yet.
-    unset CLIENT_DNS
+    # CLIENT_DNS and CLIENT_IPV6_DIRECT live only in the file: without this reset a
+    # variable from root's environment (CLIENT_DNS=... manage add) would silently
+    # reach new clients on installs whose file has no such line yet.
+    unset CLIENT_DNS CLIENT_IPV6_DIRECT
     if [[ ! -f "$config_file" ]]; then return 1; fi
 
     local line key value first_line=1
@@ -1223,17 +1292,22 @@ safe_load_config() {
                 DISABLE_IPV6|ALLOWED_IPS_MODE|ALLOWED_IPS|AWG_ENDPOINT|AWG_MTU|\
                 AWG_Jc|AWG_Jmin|AWG_Jmax|AWG_S1|AWG_S2|AWG_S3|AWG_S4|\
                 AWG_H1|AWG_H2|AWG_H3|AWG_H4|AWG_I1|AWG_I2|AWG_I3|AWG_I4|AWG_I5|AWG_PRESET|NO_TWEAKS|NO_CPS|KEEP_PACKAGES|\
-                AWG_APPLY_MODE|ALLOW_IPV6_TUNNEL|IPV6_SUBNET|SERVER_HAS_NATIVE_IPV6|PREV_AWG_PORT|CLIENT_ISOLATION|CLIENT_ISOLATION_NET|AWG_PROTOCOL|AWG_CPA|AWG_SERVER_NAME|CLIENT_DNS)
+                AWG_APPLY_MODE|ALLOW_IPV6_TUNNEL|IPV6_SUBNET|SERVER_HAS_NATIVE_IPV6|PREV_AWG_PORT|CLIENT_ISOLATION|CLIENT_ISOLATION_NET|AWG_PROTOCOL|AWG_CPA|AWG_SERVER_NAME|CLIENT_DNS|CLIENT_IPV6_DIRECT)
                     export "$key=$value"
                     ;;
                 *)
                     # A CLIENT_DNS line the parser did not recognise is named: otherwise
                     # new clients would silently get the default DNS.
                     if [[ "${key^^}" == CLIENT_DNS ]]; then log_warn "CLIENT_DNS line in $config_file not parsed: '$line'. Use the form export CLIENT_DNS='10.9.9.1' with no indent and no spaces around =. New clients will get the default DNS."; fi
+                    # The same for CLIENT_IPV6_DIRECT: otherwise the line that switches the key
+                    # off would silently not be read, and client IPv6 would keep going around the tunnel.
+                    if [[ "${key^^}" == CLIENT_IPV6_DIRECT ]]; then log_warn "CLIENT_IPV6_DIRECT line in $config_file not parsed: '$line'. Use the form export CLIENT_IPV6_DIRECT=1 (or =0) with no indent and no spaces around =."; fi
                     ;;
             esac
         elif [[ "${line^^}" == *CLIENT_DNS* ]]; then
             log_warn "CLIENT_DNS line in $config_file not parsed: '$line'. Use the form export CLIENT_DNS='10.9.9.1' with no indent and no spaces around =. New clients will get the default DNS."
+        elif [[ "${line^^}" == *CLIENT_IPV6_DIRECT* ]]; then
+            log_warn "CLIENT_IPV6_DIRECT line in $config_file not parsed: '$line'. Use the form export CLIENT_IPV6_DIRECT=1 (or =0) with no indent and no spaces around =."
         fi
     done < "$config_file"
 }
@@ -4666,7 +4740,29 @@ regenerate_client() {
         # Our earlier ::/0 on a mode-2 list (v5.31.0-v5.36.1) cuts off the local
         # network on Windows; a plain regen has to deliver the replacement. For a
         # dual-stack client ::/0 is its own scheme and stays.
-        if [[ -z "$client_ipv6" ]]; then
+        # With CLIENT_IPV6_DIRECT=1 the device's IPv6 goes directly: our route is
+        # taken away, and the ::/0 to 2000::/3 swap with its warnings is not needed.
+        if [[ -z "$client_ipv6" && "${ALLOWED_IPS_MODE:-}" == "2" ]] && _client_ipv6_direct; then
+            _aip_new=$(_aip_drop_our_v6 "$current_allowed_ips" "${ALLOWED_IPS:-}") && [[ -n "$_aip_new" ]] || {
+                log_error "Could not compute AllowedIPs for client '$name'. The config has already been regenerated from the current routing mode, but individual settings were NOT restored - check $AWG_DIR/${name}.conf."
+                exec {lock_fd}>&-
+                unset CLIENT_PSK
+                return 1
+            }
+            if [[ "$_aip_new" != "$current_allowed_ips" ]]; then
+                log "Client '$name': IPv6 route removed (CLIENT_IPV6_DIRECT=1) - the device's IPv6 goes directly, around the tunnel."
+                current_allowed_ips="$_aip_new"
+            elif [[ "${ALLOWED_IPS_MODE:-}" == "2" ]] \
+                 && { _aip_has_token "$current_allowed_ips" "2000::/3" || _aip_has_token "$current_allowed_ips" "::/0"; } \
+                 && [[ "$(grep -c ':' <<< "$(_aip_tokens "$current_allowed_ips")")" == "1" ]] \
+                 && ! _aip_has_token "$current_allowed_ips" "0.0.0.0/0" \
+                 && _is_full_tunnel "$current_allowed_ips"; then
+                # A route of our shape, but the IPv4 part is not the server list (the
+                # client was issued before an isolation or subnet change, or edited by
+                # hand): whose it is cannot be proven, so it stays - but not silently.
+                log_warn "Client '$name': IPv6 route kept - the client's IPv4 routes do not match the server list, so whose route it is cannot be told. If the client's routes were not set by hand, remove it: regen --reset-routes '$name'."
+            fi
+        elif [[ -z "$client_ipv6" ]]; then
             _aip_new=$(_aip_migrate_legacy_v6 "$current_allowed_ips" "${ALLOWED_IPS:-}") && [[ -n "$_aip_new" ]] || {
                 log_error "Could not compute AllowedIPs for client '$name'. The config has already been regenerated from the current routing mode, but individual settings were NOT restored - check $AWG_DIR/${name}.conf."
                 exec {lock_fd}>&-
