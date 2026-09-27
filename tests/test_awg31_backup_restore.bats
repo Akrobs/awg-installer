@@ -60,14 +60,55 @@ setup() {
     A="$TEST_DIR/awg"
     mkdir -p "$TEST_DIR/bin" "$A/keys"
 
+    # awg: the third-line capability the environment check reads (decision Р6).
+    # `awg set` with fewer than three arguments prints the usage (tools_old drops
+    # the third-line names); `awg set <if> ... header-protection-key <file>`
+    # keeps the key; `awg showconf` returns it (module_line2 returns nothing).
     cat > "$TEST_DIR/bin/awg" << STUB
 #!/bin/bash
 echo "awg \$*" >> "$TEST_DIR/awg.log"
 case "\$1" in
     genkey|genpsk) head -c32 /dev/urandom | base64 ;;
     pubkey) cat >/dev/null; head -c32 /dev/urandom | base64 ;;
+    set)
+        if [[ \$# -lt 3 ]]; then
+            if [[ -e "$TEST_DIR/tools_old" ]]; then
+                echo "Usage: awg set <interface> [listen-port <port>] [private-key <file path>]"
+            else
+                echo "Usage: awg set <interface> [listen-port <port>] [header-protection-key <file path>] [content-padding-addition <min-max>]"
+            fi
+            exit 1
+        fi
+        prev=""
+        for a in "\$@"; do
+            [[ "\$prev" == header-protection-key ]] && cat "\$a" > "$TEST_DIR/probe_hpk"
+            prev="\$a"
+        done
+        exit 0 ;;
+    showconf)
+        echo "[Interface]"
+        if [[ ! -e "$TEST_DIR/module_line2" && -s "$TEST_DIR/probe_hpk" ]]; then
+            echo "HeaderProtectionKey = \$(cat "$TEST_DIR/probe_hpk")"
+            echo "ContentPaddingAddition = 32-128"
+        fi
+        exit 0 ;;
     *) exit 0 ;;
 esac
+STUB
+    # uname -r and dpkg --print-architecture: a 6.8 kernel on amd64 unless a
+    # flag file says otherwise; everything else goes to the real commands.
+    local real_uname real_dpkg
+    real_uname=$(PATH=/usr/bin:/bin command -v uname)
+    real_dpkg=$(PATH=/usr/bin:/bin:/usr/sbin:/sbin command -v dpkg || echo false)
+    cat > "$TEST_DIR/bin/uname" << STUB
+#!/bin/bash
+if [[ "\$1" == -r ]]; then cat "$TEST_DIR/kver" 2>/dev/null || echo 6.8.0-45-generic; exit 0; fi
+exec "$real_uname" "\$@"
+STUB
+    cat > "$TEST_DIR/bin/dpkg" << STUB
+#!/bin/bash
+if [[ "\$1" == --print-architecture ]]; then cat "$TEST_DIR/arch" 2>/dev/null || echo amd64; exit 0; fi
+exec "$real_dpkg" "\$@"
 STUB
     cat > "$TEST_DIR/bin/awg-quick" << STUB
 #!/bin/bash
@@ -82,10 +123,14 @@ echo "systemctl \$*" >> "$TEST_DIR/systemctl.log"
 [[ "\$1" == "stop" && -e "$TEST_DIR/fail_stop" ]] && exit 1
 exit 0
 STUB
-    # ip: awg0 exists only while the flag file is there.
+    # ip: awg0 exists only while the flag file is there; the probe's temporary
+    # interfaces (awgp<pid>x<n>) live as files, so a leftover is visible.
     cat > "$TEST_DIR/bin/ip" << STUB
 #!/bin/bash
 echo "ip \$*" >> "$TEST_DIR/ip.log"
+if [[ "\$1 \$2" == "link add" ]]; then : > "$TEST_DIR/if_\$3"; exit 0; fi
+if [[ "\$1 \$2" == "link del" ]]; then [[ -e "$TEST_DIR/fail_del" ]] && exit 1; exec /bin/rm -f "$TEST_DIR/if_\$3"; fi
+if [[ "\$1 \$2" == "link show" && "\$3" == awgp* ]]; then [[ -e "$TEST_DIR/if_\$3" ]]; exit; fi
 if [[ "\$*" == *"link show"*"awg0"* ]]; then
     [[ -e "$TEST_DIR/awg0_left" ]] && { echo "5: awg0: <POINTOPOINT,UP> mtu 1280"; exit 0; }
     exit 1
@@ -713,10 +758,132 @@ STUB
 }
 @test "a rollback that cannot remove an archived client answers --json with rollback_complete=false" { _both _rb_json_partial_prune; }
 
+# ------------------------------------------------------------------ environment check (Р6)
+
+# _r_env_refused <script> <flag file> <flag content> <text the reason must name>
+_r_env_refused() {
+    local s="$1" flag="$2" content="$3" want="$4" b before nb
+    _make_31 "$K1"
+    b=$(_backup "$s")
+    _make_31 "$K2"
+    printf '%s\n' "$content" > "$TEST_DIR/$flag"
+    before=$(_state)
+    nb=$(_nbackups)
+    : > "$TEST_DIR/systemctl.log"
+    _m "$s" restore "$b"
+    _fail
+    [[ "$output$stderr" == *"$want"* ]] \
+        || { printf 'reason does not name %s:\n%s\n%s\n' "$want" "$output" "$stderr" >&2; return 1; }
+    _nope 'grep -q "^systemctl stop" "$TEST_DIR/systemctl.log"'
+    [ "$(_state)" = "$before" ]
+    [ "$(_nbackups)" -eq "$nb" ]
+    [ -z "$(find "$TEST_DIR" -maxdepth 1 -name 'if_*')" ]
+}
+_r_env_tools_old()    { _r_env_refused "$1" tools_old    x amneziawg-tools; }
+_r_env_module_line2() { _r_env_refused "$1" module_line2 x amneziawg-dkms; }
+_r_env_kernel()       { _r_env_refused "$1" kver 6.1.0-25-amd64 6.7; }
+_r_env_arm()          { _r_env_refused "$1" arch arm64 ARM; }
+@test "restore of a 3.1 backup is refused before stop when the tools do not know the third line" { _both _r_env_tools_old; }
+@test "restore of a 3.1 backup is refused before stop on a second-line module" { _both _r_env_module_line2; }
+@test "restore of a 3.1 backup is refused before stop on a kernel older than 6.7" { _both _r_env_kernel; }
+@test "restore of a 3.1 backup is refused before stop on ARM" { _both _r_env_arm; }
+
+_r_env_probe_clean() {
+    local s="$1" b
+    _make_31 "$K1"
+    b=$(_backup "$s")
+    _make_31 "$K2"
+    _m "$s" restore "$b"
+    _ok
+    # the probe really ran and left no temporary interface behind
+    grep -q '^ip link add awgp' "$TEST_DIR/ip.log"
+    [ -z "$(find "$TEST_DIR" -maxdepth 1 -name 'if_*')" ]
+}
+@test "restore of a 3.1 backup probes the module and leaves no temporary interface" { _both _r_env_probe_clean; }
+
+# manage prints DEBUG lines to stdout under --verbose; the probe hands its
+# verdict back on stdout, so its own diagnostics must not land there, or a
+# healthy third-line module reads as "could not check".
+_r_env_verbose() {
+    local s="$1" b
+    _make_31 "$K1"
+    b=$(_backup "$s")
+    _make_31 "$K2"
+    _m "$s" restore "$b" --verbose
+    _ok
+    [ "$(cat "$A/server_hpk.key")" = "$K1" ]
+    # the probe really spoke under --verbose (so the case is not vacuous)
+    [[ "$output$stderr" == *"вердикт: третья линия"* || "$output$stderr" == *"verdict: third line"* ]] \
+        || { printf 'probe diagnostics not seen:\n%s\n%s\n' "$output" "$stderr" >&2; return 1; }
+}
+@test "restore of a 3.1 backup works under --verbose: probe diagnostics do not corrupt the verdict" { _both _r_env_verbose; }
+
+# A new manage with an older library of the same MAJOR.MINOR: the check is
+# missing, and missing must mean "no", not a silent pass.
+_r_env_old_library() {
+    local s="$1" b before
+    _make_31 "$K1"
+    b=$(_backup "$s")
+    _make_31 "$K2"
+    : > "$TEST_DIR/systemctl.log"
+    _lib_for "$s"
+    sed -i '/^awg31_restore_blocker() {$/,/^}$/d' "$A/awg_common.sh"
+    grep -q '^awg31_restore_blocker() {' "$A/awg_common.sh" && return 1
+    # the library copy is itself a file in the sandbox: fingerprint after editing it
+    before=$(_state)
+    run --separate-stderr timeout 60 bash "$s" restore "$b" --yes "${MOCK_ARGS[@]}"
+    _fail
+    [[ "$output$stderr" == *awg_common.sh* ]]
+    _nope 'grep -q "^systemctl stop" "$TEST_DIR/systemctl.log"'
+    [ "$(_state)" = "$before" ]
+}
+@test "restore of a 3.1 backup is refused when the library lacks the environment check" { _both _r_env_old_library; }
+
+# The probe could not remove its temporary interface: manage says so on exit.
+_r_env_probe_leftover_warned() {
+    local s="$1" b
+    _make_31 "$K1"
+    b=$(_backup "$s")
+    _make_31 "$K2"
+    : > "$TEST_DIR/fail_del"
+    _m "$s" restore "$b"
+    [[ "$output$stderr" == *"ip link show type amneziawg | grep awgp"* ]] \
+        || { printf 'no leftover warning:\n%s\n%s\nTMPDIR=%s\n' "$output" "$stderr" "${TMPDIR:-}" >&2; ls -la "${TMPDIR:-/tmp}"/awg31probe* >&2 2>&1; cat "$TEST_DIR/ip.log" >&2; return 1; }
+    /bin/rm -f "$TEST_DIR/fail_del" "$TEST_DIR"/if_* "${TMPDIR:-/tmp}"/awg31probe.*.iface 2>/dev/null || :
+}
+@test "a probe interface that could not be removed is reported when manage exits" { _both _r_env_probe_leftover_warned; }
+
+_r_env_not_for_20() {
+    local s="$1" b
+    _make_20
+    b=$(_backup "$s")
+    _make_31 "$K1"
+    : > "$TEST_DIR/tools_old"
+    : > "$TEST_DIR/awg.log"
+    _m "$s" restore "$b"
+    _ok
+    # a 2.0 candidate needs nothing from the third line: no probe at all
+    _nope 'grep -qx "awg set" "$TEST_DIR/awg.log"'
+    _nope 'grep -q "^ip link add awgp" "$TEST_DIR/ip.log" 2>/dev/null'
+}
+@test "restore of a 2.0 backup does not run the third-line environment check" { _both _r_env_not_for_20; }
+
 # A dynamic "no syncconf" case cannot fail here: restore has no apply step at
 # all and the sandbox sets AWG_SKIP_APPLY, so the source check below is the pin.
 
 # ------------------------------------------------------------------ no syncconf
+
+# `exec {fd}>&- 2>/dev/null` without a command applies BOTH redirections to the
+# shell for good: after restore every later stderr line of manage went to
+# /dev/null. The dynamic side of this is the probe-leftover case above (its
+# warning is printed on exit, after the restore cleanup).
+@test "no bare exec with a stderr redirection in any script (it would mute the shell)" {
+    local s hits
+    for s in "$BATS_TEST_DIRNAME"/../*.sh; do
+        hits=$(grep -nE '(^|[;&|[:space:]])exec( +[0-9{][^ ;]*)+ +2>' "$s" | grep -vE '^\s*[0-9]+:\s*#' || true)
+        [ -z "$hits" ] || { echo "$s: $hits"; return 1; }
+    done
+}
 
 @test "neither restore nor its rollback calls syncconf (source, both twins)" {
     local s f body
