@@ -457,11 +457,19 @@ _backup_configs_nolock() {
     # pre-restore snapshot'ом: иначе при уже накопленных 10 бэкапах prune
     # обрезал бы самый старый, которым может оказаться именно выбранный для
     # восстановления файл (он лежит в той же папке $AWG_DIR/backups).
-    local no_prune=0
-    if [[ "${1:-}" == "--no-prune" ]]; then
-        no_prune=1
+    # --snapshot: снимок перед restore. Файл ключа защиты заголовков (обычный
+    # файл; ссылку или каталог restore отвергает до снимка) берётся как есть, без
+    # проверки согласованности: откат обязан вернуть ровно то, что было, а
+    # restore должен оставаться способом починить испорченный ключ.
+    local no_prune=0 snapshot=0
+    while [[ "${1:-}" == --* ]]; do
+        case "$1" in
+            --no-prune) no_prune=1 ;;
+            --snapshot) snapshot=1 ;;
+            *) break ;;
+        esac
         shift
-    fi
+    done
     log "Создание бэкапа..."
     local bd="$AWG_DIR/backups"
     mkdir -p "$bd" || die "Ошибка mkdir $bd"
@@ -540,6 +548,41 @@ _backup_configs_nolock() {
             log_error "Не удалось сохранить server_public.key в бэкап."
             rm -rf "$td"
             return 1
+        fi
+    fi
+
+    # Ключ защиты заголовков (3.1). На установке 3.1 он обязателен: без него бэкап
+    # не восстановить в рабочий сервер. awg_hpk_ensure сверяет файл с awg0.conf и
+    # восстанавливает потерянный файл из конфига; расхождение - отказ бэкапа с
+    # названной причиной. Снимок перед restore берёт файл как есть (см. --snapshot).
+    local _hpk _hpk_gen
+    if ! _hpk=$(awg_hpk_path); then
+        log_error "AWG_DIR не задан: ключ защиты заголовков в бэкап не попадёт."
+        rm -rf "$td"
+        return 1
+    fi
+    if (( snapshot )); then
+        if [[ -f "$_hpk" && ! -L "$_hpk" ]] && ! cp -a "$_hpk" "$td/"; then
+            log_error "Не удалось сохранить $_hpk в снимок."
+            rm -rf "$td"
+            return 1
+        fi
+    else
+        # Проверка при любом маркере: испорченный маркер или маркер 2.0 при ключе в
+        # awg0.conf дали бы архив, который restore потом отвергнет. Без ключа
+        # awg_hpk_ensure только предупреждает, и бэкап идёт как раньше.
+        if ! awg_hpk_ensure manage; then
+            log_error "Ключ защиты заголовков не согласован с установкой (причина выше) - бэкап не создан: такой архив не восстановился бы."
+            rm -rf "$td"
+            return 1
+        fi
+        _hpk_gen=$(_awg_generation_from_init "$CONFIG_FILE") || _hpk_gen=""
+        if [[ "$_hpk_gen" == "3.1" ]]; then
+            if ! cp -a "$_hpk" "$td/" || ! chmod 600 "$td/server_hpk.key"; then
+                log_error "Установка 3.1: ключ защиты заголовков ($_hpk) в бэкап не сохранён - бэкап не создан."
+                rm -rf "$td"
+                return 1
+            fi
         fi
     fi
 
@@ -632,13 +675,66 @@ _restore_do_rollback() {
         log_error "Не удалось распаковать rollback snapshot ($_snap). Ручное восстановление: tar -xzf $_snap -C <нужная папка>"
         return 1
     fi
-    local _scdir
+    local _scdir _inc=0
     _scdir=$(dirname "$SERVER_CONF_FILE")
-    [[ -d "$_rtd/server" ]] && cp -a "$_rtd/server/"* "$_scdir/" 2>/dev/null
-    [[ -d "$_rtd/clients" ]] && cp -a "$_rtd/clients/"* "$AWG_DIR/" 2>/dev/null
-    [[ -d "$_rtd/keys" ]] && cp -a "$_rtd/keys/"* "$KEYS_DIR/" 2>/dev/null
-    [[ -f "$_rtd/server_private.key" ]] && cp -a "$_rtd/server_private.key" "$AWG_DIR/" 2>/dev/null
-    [[ -f "$_rtd/server_public.key" ]] && cp -a "$_rtd/server_public.key" "$AWG_DIR/" 2>/dev/null
+    # Клиентские файлы и ключи приводятся ровно к снимку, а не накладываются
+    # поверх: restore уже заменил их набором из архива, и клиент из архива,
+    # которого до restore не было, иначе остался бы рядом с прежними (при смене
+    # поколения - профиль чужого поколения).
+    # Конфиги и ключи клиентов снимок берёт целиком (сбой копирования - отказ
+    # снимка), QR и vpnuri - по возможности, они перевыпускаются из конфигов.
+    # Сбой копирования после удаления называется вслух: иначе откат молча
+    # оставил бы пустой набор при rolled_back=true.
+    if [[ -d "$_rtd/clients" ]]; then
+        rm -f "$AWG_DIR"/*.conf "$AWG_DIR"/*.png "$AWG_DIR"/*.vpnuri 2>/dev/null
+        if compgen -G "$AWG_DIR/*.conf" >/dev/null || compgen -G "$AWG_DIR/*.png" >/dev/null \
+            || compgen -G "$AWG_DIR/*.vpnuri" >/dev/null; then
+            log_error "Откат: не удалось убрать клиентские файлы из архива в $AWG_DIR - рядом с файлами из снимка остались лишние."
+            _inc=1
+        fi
+    fi
+    if [[ -d "$_rtd/keys" ]]; then
+        rm -f "$KEYS_DIR"/* 2>/dev/null
+        if compgen -G "$KEYS_DIR/*" >/dev/null; then
+            log_error "Откат: не удалось убрать ключи клиентов из архива в $KEYS_DIR."
+            _inc=1
+        fi
+    fi
+    if compgen -G "$_rtd/server/*" >/dev/null && ! cp -a "$_rtd/server/"* "$_scdir/" 2>/dev/null; then
+        log_error "Откат: серверный конфиг не возвращён в $_scdir. Он есть в снимке $_snap (каталог server/)."
+        _inc=1
+    fi
+    if compgen -G "$_rtd/clients/*" >/dev/null && ! cp -a "$_rtd/clients/"* "$AWG_DIR/" 2>/dev/null; then
+        log_error "Откат: клиентские файлы не возвращены в $AWG_DIR. Они есть в снимке $_snap (каталог clients/)."
+        _inc=1
+    fi
+    if compgen -G "$_rtd/keys/*" >/dev/null && ! cp -a "$_rtd/keys/"* "$KEYS_DIR/" 2>/dev/null; then
+        log_error "Откат: ключи клиентов не возвращены в $KEYS_DIR. Они есть в снимке $_snap (каталог keys/)."
+        _inc=1
+    fi
+    local _kf
+    for _kf in server_private.key server_public.key; do
+        if [[ -f "$_rtd/$_kf" ]] && ! cp -a "$_rtd/$_kf" "$AWG_DIR/" 2>/dev/null; then
+            log_error "Откат: $_kf не возвращён в $AWG_DIR. Он есть в снимке $_snap."
+            _inc=1
+        fi
+    done
+    # Файл ключа защиты заголовков: как в снимке. restore не начинается, если на
+    # месте ключа ссылка или каталог, поэтому здесь он либо обычный файл, либо его
+    # нет. Нет в снимке - его положил restore, и он убирается; есть - возвращается
+    # с правами 600 без перехода по ссылке на месте назначения.
+    local _hpk
+    if _hpk=$(awg_hpk_path 2>/dev/null); then
+        if [[ -f "$_rtd/server_hpk.key" ]]; then
+            if ! ( umask 077; cp --remove-destination "$_rtd/server_hpk.key" "$_hpk" ) 2>/dev/null \
+                || ! chmod 600 "$_hpk" 2>/dev/null; then
+                log_error "Откат: ключ защиты заголовков не возвращён в $_hpk. Он есть в снимке $_snap."
+                _inc=1
+            fi
+        elif [[ -f "$_hpk" && ! -L "$_hpk" ]]; then
+            rm -f "$_hpk" 2>/dev/null || { log_error "Откат: не удалось убрать $_hpk, положенный restore."; _inc=1; }
+        fi
+    fi
     # Метки срока приводятся ровно к снимку. restore мог положить метки из
     # архива, и такая метка у клиента, бессрочного до restore, означала бы его
     # удаление cron в срок из архива при rolled_back=true. Снимок снят с
@@ -651,6 +747,7 @@ _restore_do_rollback() {
             rm -f "$_ef" 2>/dev/null
             if [[ -e "$_ef" || -L "$_ef" ]]; then
                 log_error "Откат: не удалось удалить метку срока $_ef из архива - клиент '${_ef##*/}' может быть удалён cron в срок из архива. Удалите метку вручную."
+                _inc=1
             fi
         done
     fi
@@ -658,13 +755,23 @@ _restore_do_rollback() {
         mkdir -p "$_edir"
         if compgen -G "$_rtd/expiry/*" >/dev/null && ! cp -a "$_rtd/expiry"/* "$_edir/" 2>/dev/null; then
             log_error "Откат: метки срока из снимка не восстановлены в $_edir - проверьте сроки клиентов (manage list)."
+            _inc=1
         fi
     fi
-    [[ -f "$_rtd/awg-expiry" ]] && cp -a "$_rtd/awg-expiry" /etc/cron.d/awg-expiry 2>/dev/null
+    if [[ -f "$_rtd/awg-expiry" ]] && ! cp -a "$_rtd/awg-expiry" /etc/cron.d/awg-expiry 2>/dev/null; then
+        log_error "Откат: /etc/cron.d/awg-expiry не возвращён - без него клиенты с истёкшим сроком не удаляются. Он есть в снимке $_snap."
+        _inc=1
+    fi
     rm -rf "$_rtd"
     # Файлы отката скопированы - для JSON-конверта rolled_back=true даже если
     # сервис ниже не стартует (состояние ФС уже возвращено к pre-restore).
     _RESTORE_ROLLED_BACK=1
+    # Неполный откат отличается в JSON-конверте: rollback_complete=false.
+    _RESTORE_ROLLBACK_COMPLETE=1
+    if (( _inc )); then
+        _RESTORE_ROLLBACK_COMPLETE=0
+        log_error "Откат неполный (причины выше): недостающие файлы есть в снимке $_snap."
+    fi
 
     log "Откат завершён — пытаюсь запустить сервис..."
     if systemctl start awg-quick@awg0; then
@@ -683,6 +790,25 @@ _restore_do_rollback() {
 _path_has_parent_component() {
     local p="$1"
     [[ "$p" == ".." || "$p" == "../"* || "$p" == *"/../"* || "$p" == *"/.." ]]
+}
+
+# _restore_check_candidate <распакованный бэкап> : проверка кандидата restore на
+# ЕГО путях, в подоболочке с переопределёнными CONFIG_FILE, SERVER_CONF_FILE и
+# AWG_DIR, а не на живых. Правила ключа - те же, что у awg_hpk_ensure: маркер из
+# init бэкапа (в бэкапе нет init - маркер остаётся живым, как и после restore),
+# ключ в его awg0.conf и файл ключа в корне бэкапа согласованы; потерянный файл
+# восстанавливается из конфига внутри распакованного каталога. Затем
+# validate_awg_config на конфиге кандидата; причины отказа печатают сами проверки.
+_restore_check_candidate() {
+    local td="$1" init
+    init="$td/clients/awgsetup_cfg.init"
+    [[ -f "$init" ]] || init="$CONFIG_FILE"
+    (
+        CONFIG_FILE="$init"
+        SERVER_CONF_FILE="$td/server/$(basename "$SERVER_CONF_FILE")"
+        AWG_DIR="$td"
+        awg_hpk_ensure manage && validate_awg_config
+    )
 }
 
 restore_backup() {
@@ -791,16 +917,6 @@ restore_backup() {
     trap '_restore_cleanup; exit 130' INT
     trap '_restore_cleanup; exit 143' TERM
 
-    log "Создание бэкапа текущей..."
-    # --no-prune: выбранный для восстановления $bf лежит в той же папке бэкапов;
-    # prune после создания pre-restore снапшота мог бы удалить именно его.
-    if ! _backup_configs_nolock --no-prune; then
-        log_error "Не удалось создать бэкап текущей конфигурации."
-        return 1
-    fi
-    # Фиксируем rollback snapshot (устанавливается _backup_configs_nolock)
-    _rollback_snap="${LAST_BACKUP_PATH:-}"
-
     manage_mktempdir_var td || {
         log_error "Ошибка создания временной директории"
         return 1
@@ -889,8 +1005,53 @@ restore_backup() {
         log_warn "awg_common.sh устарела: нет awg_restore_generation_notice, проверка поколения при восстановлении пропущена. Обновите скрипты (раздел «Как обновить скрипты» в ADVANCED.md)."
     fi
 
+    # Кандидат проверяется целиком ДО снимка и ДО остановки сервиса: маркер, ключ
+    # в конфиге и файл ключа согласованы, конфиг проходит валидацию. Отказ здесь
+    # ничего не останавливает, ничего не переписывает и снимка не оставляет.
+    if ! _restore_check_candidate "$td"; then
+        log_error "Бэкап не прошёл проверку (причина выше) - восстановление отменено, сервис не остановлен, файлы не менялись."
+        return 1
+    fi
+    local _cand_init="$td/clients/awgsetup_cfg.init" _cand_gen _hpk
+    [[ -f "$_cand_init" ]] || _cand_init="$CONFIG_FILE"
+    _cand_gen=$(_awg_generation_from_init "$_cand_init") || _cand_gen=""
+    _hpk=$(awg_hpk_path) || { log_error "AWG_DIR не задан - восстановление отменено."; return 1; }
+    # На месте файла ключа ссылка или каталог: снимок и откат вернуть такое ровно
+    # не могут, а запись ключа прошла бы мимо. Это ручная правка, её разбирает человек.
+    if [[ -L "$_hpk" || ( -e "$_hpk" && ! -f "$_hpk" ) ]]; then
+        log_error "$_hpk - не обычный файл (ссылка или каталог): восстановление отменено, сервис не остановлен, файлы не менялись. Уберите его вручную и повторите restore."
+        return 1
+    fi
+
+    log "Создание бэкапа текущей..."
+    # --no-prune: выбранный для восстановления $bf лежит в той же папке бэкапов;
+    # prune после создания pre-restore снапшота мог бы удалить именно его.
+    if ! _backup_configs_nolock --no-prune --snapshot; then
+        log_error "Не удалось создать бэкап текущей конфигурации."
+        return 1
+    fi
+    # Фиксируем rollback snapshot (устанавливается _backup_configs_nolock)
+    _rollback_snap="${LAST_BACKUP_PATH:-}"
+
     log "Остановка сервиса..."
-    systemctl stop awg-quick@awg0 || log_warn "Сервис не остановлен."
+    if ! systemctl stop awg-quick@awg0; then
+        log_error "Сервис не остановлен - восстановление отменено, файлы не менялись (снимок текущего состояния: ${_rollback_snap}). Проверьте: systemctl status awg-quick@awg0"
+        return 1
+    fi
+    # Параметры устройства, в том числе ключ защиты заголовков, на живом
+    # интерфейсе залипают, поэтому restore идёт только через пересоздание awg0.
+    # Интерфейс, оставшийся после остановки, - отказ до замены файлов. Сервис
+    # уже остановлен, поэтому его пробуем запустить снова и честно говорим итог.
+    if ip link show awg0 >/dev/null 2>&1; then
+        log_error "Интерфейс awg0 остался после остановки сервиса - восстановление отменено, файлы не менялись."
+        if systemctl start awg-quick@awg0; then
+            log_warn "Сервис запущен снова на прежних файлах. Снимите awg0 (awg-quick down awg0) и повторите restore."
+        else
+            log_error "Сервис не запустился снова: он остановлен, awg0 остался. Снимите awg0 (awg-quick down awg0), затем systemctl start awg-quick@awg0 или повторите restore."
+            _log_service_status
+        fi
+        return 1
+    fi
 
     # С этого момента destructive ops. Все error paths → trap _restore_cleanup → rollback.
     _destructive_ops_started=1
@@ -969,6 +1130,15 @@ restore_backup() {
         fi
         chmod 600 "$AWG_DIR/server_public.key" 2>/dev/null || true
     fi
+    # Ключ защиты заголовков: только для кандидата 3.1, файл уже сверен с его
+    # awg0.conf. Права 600 с момента создания, ссылка на месте назначения
+    # заменяется, а не пишется насквозь.
+    if [[ "$_cand_gen" == "3.1" ]]; then
+        if ! ( umask 077; cp --remove-destination "$td/server_hpk.key" "$_hpk" ) || ! chmod 600 "$_hpk"; then
+            log_error "Ошибка копирования ключа защиты заголовков в $_hpk - восстановление прервано (запуск отката)."
+            return 1
+        fi
+    fi
 
     if [[ -d "$td/expiry" ]]; then
         log "Восстановление данных expiry..."
@@ -1030,6 +1200,19 @@ restore_backup() {
 
     # Успех — rollback не нужен, trap выполнит только cleanup
     _restore_ok=1
+    # Восстановлена установка не 3.1, а файл ключа от прежней 3.1 остался: он не
+    # удаляется, а уходит в archive/<время>-3.1/, чтобы к 3.1 можно было вернуться.
+    # Перенос после успешного старта, поэтому откат его не касается.
+    if [[ "$_cand_gen" != "3.1" ]] && [[ -e "$_hpk" || -L "$_hpk" ]]; then
+        local _arch
+        _arch="$AWG_DIR/archive/$(date +%F_%H-%M-%S.%3N)-3.1"
+        if mkdir -p "$AWG_DIR/archive" && chmod 700 "$AWG_DIR/archive" && mkdir -m 700 "$_arch" \
+            && mv -n "$_hpk" "$_arch/" && [[ ! -e "$_hpk" && ! -L "$_hpk" ]]; then
+            log "Файл ключа защиты заголовков перенесён в $_arch/: восстановленная установка ${_cand_gen:-2.0} его не использует."
+        else
+            log_warn "Не удалось перенести $_hpk в архив: установка ${_cand_gen:-2.0} его не использует, файл можно убрать вручную."
+        fi
+    fi
     # Восстановление подменило awg0.conf и пересоздало интерфейс, поэтому снимок
     # набора device-параметров надо взять заново: он должен описывать то, что
     # стоит на живом интерфейсе СЕЙЧАС, а не до восстановления.
@@ -2930,7 +3113,12 @@ case $COMMAND in
             # человекочитаемый текст, машинные решения по ok/rc.
             if [[ "$JSON_OUTPUT" -eq 1 ]]; then
                 _jrb=false; [[ "${_RESTORE_ROLLED_BACK:-0}" == "1" ]] && _jrb=true
-                json_out "{\"command\":\"restore\",\"ok\":false,\"error\":\"$(json_escape "${_JSON_ERR:-restore failed (see stderr)}")\",\"source\":\"$(json_escape "${_RESTORE_SOURCE:-}")\",\"applied\":false,\"rolled_back\":$_jrb,\"rc\":1}"
+                _jrc=""
+                if [[ "$_jrb" == true ]]; then
+                    _jrc=',"rollback_complete":true'
+                    [[ "${_RESTORE_ROLLBACK_COMPLETE:-1}" == "1" ]] || _jrc=',"rollback_complete":false'
+                fi
+                json_out "{\"command\":\"restore\",\"ok\":false,\"error\":\"$(json_escape "${_JSON_ERR:-restore failed (see stderr)}")\",\"source\":\"$(json_escape "${_RESTORE_SOURCE:-}")\",\"applied\":false,\"rolled_back\":$_jrb${_jrc},\"rc\":1}"
             fi
         fi
         ;;
