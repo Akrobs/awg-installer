@@ -25,6 +25,21 @@ set -o pipefail
 # passes. Nothing here needs colour from the tools, so it is off for the whole
 # script.
 export WG_COLOR_MODE=never
+# On Debian su without "-", like a run from cron, leaves PATH without the sbin
+# directories. Then sysctl and ufw, which the script calls by name, are not found,
+# and check falsely reports IP forwarding off and UFW not installed. The missing
+# directories are appended, so the order the user chose is not overridden.
+_awg_ensure_sbin_path() {
+    local d
+    for d in /usr/local/sbin /usr/sbin /sbin; do
+        case ":${PATH}:" in
+            *":${d}:"*) ;;
+            *) PATH="${PATH:+${PATH}:}${d}" ;;
+        esac
+    done
+    export PATH
+}
+_awg_ensure_sbin_path
 AWG_DIR="/root/awg"
 SERVER_CONF_FILE="/etc/amnezia/amneziawg/awg0.conf"
 CONFIG_FILE="$AWG_DIR/awgsetup_cfg.init"

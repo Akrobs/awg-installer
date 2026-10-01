@@ -24,6 +24,21 @@ set -o pipefail
 # и 0 и молча проходит. Цвет инструментам здесь не нужен, поэтому он выключен для
 # всего скрипта.
 export WG_COLOR_MODE=never
+# В Debian su без дефиса, как и запуск из cron, оставляет PATH без каталогов sbin.
+# Тогда sysctl и ufw, которые скрипт зовёт по имени, не находятся, и check ложно
+# сообщает, что IP forwarding выключен, а UFW не установлен. Недостающие каталоги
+# дописываются в конец, чтобы не перебить порядок, выбранный пользователем.
+_awg_ensure_sbin_path() {
+    local d
+    for d in /usr/local/sbin /usr/sbin /sbin; do
+        case ":${PATH}:" in
+            *":${d}:"*) ;;
+            *) PATH="${PATH:+${PATH}:}${d}" ;;
+        esac
+    done
+    export PATH
+}
+_awg_ensure_sbin_path
 AWG_DIR="/root/awg"
 SERVER_CONF_FILE="/etc/amnezia/amneziawg/awg0.conf"
 CONFIG_FILE="$AWG_DIR/awgsetup_cfg.init"

@@ -21,6 +21,23 @@ set -o pipefail
 # находит «interface: awg0» и ложно проваливается (на «jc:» ложно предупреждает).
 # Цвет инструментам здесь не нужен, поэтому он выключен для всего скрипта.
 export WG_COLOR_MODE=never
+# В Debian su без дефиса, как и запуск из cron, оставляет PATH без каталогов sbin.
+# Тогда dpkg отказывается ставить пакеты (не находит ldconfig и start-stop-daemon),
+# а reboot, dkms, sysctl, ufw и modprobe, которые скрипт зовёт по имени, не
+# находятся: установка вставала уже в шаге 1.
+# Недостающие каталоги дописываются в конец, чтобы не перебить порядок,
+# выбранный пользователем.
+_awg_ensure_sbin_path() {
+    local d
+    for d in /usr/local/sbin /usr/sbin /sbin; do
+        case ":${PATH}:" in
+            *":${d}:"*) ;;
+            *) PATH="${PATH:+${PATH}:}${d}" ;;
+        esac
+    done
+    export PATH
+}
+_awg_ensure_sbin_path
 
 SCRIPT_VERSION="5.37.0"
 AWG_DIR="/root/awg"
@@ -5948,6 +5965,20 @@ PPASRC
 # (StandardOutput=journal, StandardError=journal in the unit file).
 
 set -euo pipefail
+
+# A later apt run does not pass through the installer's guard: apt runs this
+# helper as a hook with the caller's environment, and an apt started from su
+# without "-" (Debian) brings a PATH without sbin, where "command -v dkms"
+# below would report dkms missing and exit 0. Append the missing sbin
+# directories first.
+for _d in /usr/local/sbin /usr/sbin /sbin; do
+    case ":${PATH}:" in
+        *":${_d}:"*) ;;
+        *) PATH="${PATH:+${PATH}:}${_d}" ;;
+    esac
+done
+unset _d
+export PATH
 
 MODE="${1:-}"
 case "$MODE" in
