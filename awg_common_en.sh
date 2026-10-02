@@ -1013,6 +1013,172 @@ _sanitize_awg_dkms_conf() {
     done
 }
 
+# Kernel 7.0 with the udp_tunnel backport (Ubuntu 26.04 7.0.0-38, 24.04 HWE):
+# the AmneziaWG module from the PPA does not build for such a kernel. This
+# function identifies the module source by the exact SHA-256 of
+# compat/compat.h and applies the upstream PR #218 fix
+# (amneziawg-linux-kernel-module, commit 62189503fa51) only to the known base;
+# any other source (someone else's edit, the pinned 2.0 source on kernels
+# < 6.7, a source fixed in the PPA - that one is patched or foreign) is left
+# alone.
+# Usage: awg_kmod_compat_fix check|apply|revert <DKMS source dir> [diff]
+#   check  - class: base | patched | foreign | absent (no compat.h) | unsafe
+#            (compat.h is a symlink or not a regular file); exit 0
+#   apply  - base -> applied; the result must hash to PATCHED, otherwise the
+#            source is untouched. patched -> already, foreign and absent are
+#            printed as is with exit 0: the word decides, not the code.
+#            unsafe exits 1.
+#   revert - patched -> reverted, only if compat.h.awg-base is exactly base;
+#            base -> already, absent -> absent (exit 0); anything else is
+#            error:<reason> (usually error:revert) or unsafe (exit 1)
+# A failure is error:<reason> with exit 1; a wrong directory (missing, or
+# compat is not a directory or is a symlink) is error:src.
+# Stdout always carries one word, patch output goes to stderr. If
+# compat.h.awg-base is a symlink, a directory or a FIFO, apply on base and
+# revert on patched stop with error:backup; the backup type is checked again
+# before each read of it, and it is written with mv -T, which never puts a
+# file into a directory and replaces a symlink without following it. All
+# intermediate files live in a temporary directory .awg-kmod.XXXXXX inside
+# compat/; the hash of compat.h is checked again right before it is
+# replaced, and the swap is mv -T from that directory into compat/ (same
+# filesystem, so the rename is atomic). Mode and owner come from the current
+# compat.h (on apply and on revert). The temporary directory is removed at
+# the end of the call; if that fails, the word and the exit code stay as
+# they are (a successful swap is not rolled back) and a warning goes to
+# stderr. A directory left by a killed call stays (it does not affect the
+# build); the function does not remove other directories, because a name
+# cannot tell an abandoned one from a live one.
+# Only apply and revert take the lock: flock on $AWG_KMOD_LOCK (default
+# /run/lock/amneziawg-kmod.lock; a symlink or a non-regular file is
+# error:lock), waiting $AWG_KMOD_LOCK_WAIT seconds: 0 or an integer 1-99999
+# without leading zeros, unset or empty means 0 (do not wait), anything else
+# is error:usage; check ignores it. A caller that already holds this lock
+# and serialises its own calls sets AWG_KMOD_LOCK_HELD=1 for that call only:
+# a second descriptor on the same file in one process would get error:busy
+# at once or after the wait. dpkg
+# does not take this lock, so the hash re-check narrows the race with a
+# package unpack but does not remove it.
+# The function body is byte-identical in awg_common.sh, awg_common_en.sh and
+# in the amneziawg-ensure-module helper of both installers (a test checks it).
+awg_kmod_compat_fix() {
+    local mode="${1:-}" src="${2:-}" diff="${3:-}"
+    local base_sha=b14346040ce0188c47e2db2baad1a4f21aa784510f6c95bbb4aa58d5bbe691c9
+    local fixed_sha=8d47a358b4df0b2187788ce6f88ad63128218de1be22c78b263ef3e5d770c26b
+    local lock="${AWG_KMOD_LOCK:-/run/lock/amneziawg-kmod.lock}"
+    local wait="${AWG_KMOD_LOCK_WAIT:-0}"
+    local f="${src}/compat/compat.h" bak="${src}/compat/compat.h.awg-base"
+    local cls="" sha="" out="" rc=1 fd="" stage=""
+    case "$mode" in
+        check|apply|revert) ;;
+        *) printf '%s\n' 'error:usage'; return 1 ;;
+    esac
+    if [[ "$mode" != check && ! "$wait" =~ ^(0|[1-9][0-9]{0,4})$ ]]; then
+        printf '%s\n' 'error:usage'; return 1
+    fi
+    while :; do
+        if [[ -z "$src" ]]; then out='error:usage'; break; fi
+        if [[ ! -d "$src" || -L "${src}/compat" ]] || [[ -e "${src}/compat" && ! -d "${src}/compat" ]]; then
+            out='error:src'; break
+        fi
+        if [[ "$mode" != check && "${AWG_KMOD_LOCK_HELD:-0}" != 1 ]]; then
+            if ! command -v flock >/dev/null 2>&1; then out='error:no-flock'; break; fi
+            if [[ -L "$lock" ]] || [[ -e "$lock" && ! -f "$lock" ]]; then out='error:lock'; break; fi
+            if ! { command exec {fd}>>"$lock"; } 2>/dev/null; then fd=""; out='error:lock'; break; fi
+            if [[ "$wait" -eq 0 ]]; then
+                if ! flock -n "$fd"; then out='error:busy'; break; fi
+            elif ! flock -w "$wait" "$fd"; then
+                out='error:busy'; break
+            fi
+        fi
+        if [[ -L "$f" ]]; then
+            cls=unsafe
+        elif [[ ! -e "$f" ]]; then
+            cls=absent
+        elif [[ ! -f "$f" ]]; then
+            cls=unsafe
+        elif ! sha=$(sha256sum -- "$f" 2>/dev/null); then
+            out='error:read'; break
+        else
+            sha="${sha%% *}"
+            if [[ "$sha" == "$base_sha" ]]; then cls=base
+            elif [[ "$sha" == "$fixed_sha" ]]; then cls=patched
+            else cls=foreign
+            fi
+        fi
+        if [[ "$mode" == check ]]; then out="$cls"; rc=0; break; fi
+        if [[ "$cls" == unsafe ]]; then out='unsafe'; break; fi
+        if [[ "$cls" == absent ]]; then out='absent'; rc=0; break; fi
+        if [[ "$mode" == revert ]]; then
+            if [[ "$cls" == base ]]; then out='already'; rc=0; break; fi
+            if [[ "$cls" != patched ]]; then out='error:revert'; break; fi
+            if [[ -L "$bak" ]] || [[ -e "$bak" && ! -f "$bak" ]]; then out='error:backup'; break; fi
+            if [[ ! -f "$bak" ]]; then out='error:revert'; break; fi
+            if ! sha=$(sha256sum -- "$bak" 2>/dev/null) || [[ "${sha%% *}" != "$base_sha" ]]; then
+                out='error:revert'; break
+            fi
+            if ! stage=$(mktemp -d "${src}/compat/.awg-kmod.XXXXXX" 2>/dev/null); then
+                stage=""; out='error:tmp'; break
+            fi
+            if [[ -L "$bak" ]] || [[ -e "$bak" && ! -f "$bak" ]]; then out='error:backup'; break; fi
+            if ! cp -- "$bak" "${stage}/new" 2>/dev/null; then out='error:copy'; break; fi
+            if ! sha=$(sha256sum -- "${stage}/new" 2>/dev/null) || [[ "${sha%% *}" != "$base_sha" ]]; then
+                out='error:copy'; break
+            fi
+            if ! chown --reference="$f" -- "${stage}/new" 2>/dev/null \
+                    || ! chmod --reference="$f" -- "${stage}/new" 2>/dev/null; then
+                out='error:perm'; break
+            fi
+            if [[ -L "$f" || ! -f "$f" ]] || ! sha=$(sha256sum -- "$f" 2>/dev/null) \
+                    || [[ "${sha%% *}" != "$fixed_sha" ]]; then
+                out='error:changed'; break
+            fi
+            if ! mv -fT -- "${stage}/new" "$f" 2>/dev/null; then out='error:mv'; break; fi
+            out='reverted'; rc=0; break
+        fi
+        if [[ "$cls" == patched ]]; then out='already'; rc=0; break; fi
+        if [[ "$cls" == foreign ]]; then out='foreign'; rc=0; break; fi
+        if [[ -z "$diff" || ! -f "$diff" || ! -r "$diff" ]]; then out='error:no-diff'; break; fi
+        if ! command -v patch >/dev/null 2>&1; then out='error:no-patch'; break; fi
+        if ! stage=$(mktemp -d "${src}/compat/.awg-kmod.XXXXXX" 2>/dev/null); then
+            stage=""; out='error:tmp'; break
+        fi
+        if ! cp -- "$f" "${stage}/in" 2>/dev/null; then out='error:copy'; break; fi
+        if ! sha=$(sha256sum -- "${stage}/in" 2>/dev/null) || [[ "${sha%% *}" != "$base_sha" ]]; then
+            out='error:changed'; break
+        fi
+        if ! patch --forward --batch --fuzz=0 --no-backup-if-mismatch \
+                --reject-file="${stage}/rej" -o "${stage}/new" "${stage}/in" <"$diff" >&2; then
+            out='error:patch'; break
+        fi
+        if ! sha=$(sha256sum -- "${stage}/new" 2>/dev/null) || [[ "${sha%% *}" != "$fixed_sha" ]]; then
+            out='error:result'; break
+        fi
+        if ! chown --reference="$f" -- "${stage}/new" 2>/dev/null \
+                || ! chmod --reference="$f" -- "${stage}/new" 2>/dev/null; then
+            out='error:perm'; break
+        fi
+        if [[ -L "$bak" ]] || [[ -e "$bak" && ! -f "$bak" ]]; then out='error:backup'; break; fi
+        if ! sha=$(sha256sum -- "$bak" 2>/dev/null) || [[ "${sha%% *}" != "$base_sha" ]]; then
+            if ! cp -- "${stage}/in" "${stage}/bak" 2>/dev/null \
+                    || ! mv -fT -- "${stage}/bak" "$bak" 2>/dev/null; then
+                out='error:backup'; break
+            fi
+        fi
+        if [[ -L "$f" || ! -f "$f" ]] || ! sha=$(sha256sum -- "$f" 2>/dev/null) \
+                || [[ "${sha%% *}" != "$base_sha" ]]; then
+            out='error:changed'; break
+        fi
+        if ! mv -fT -- "${stage}/new" "$f" 2>/dev/null; then out='error:mv'; break; fi
+        out='applied'; rc=0; break
+    done
+    if [[ -n "$stage" ]] && ! rm -rf -- "$stage" 2>/dev/null; then
+        printf 'awg_kmod_compat_fix: cannot remove %s\n' "$stage" >&2 || :
+    fi
+    if [[ -n "$fd" ]]; then command exec {fd}>&- || :; fi
+    printf '%s\n' "$out"
+    return "$rc"
+}
+
 # Install a kernel headers package via a distro-aware fallback chain.
 # Argument: kernel version (defaults to $(uname -r)).
 # Returns: 0 if at least one candidate installed successfully, 1 if all failed.

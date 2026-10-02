@@ -16,3 +16,8 @@ indent_size = 2
 
 [Makefile]
 indent_style = tab
+
+# Hash-pinned test fixtures: keep bytes as they are
+[tests/fixtures/kmod/{compat.h.base,pr218.diff}]
+trim_trailing_whitespace = unset
+insert_final_newline = unset
