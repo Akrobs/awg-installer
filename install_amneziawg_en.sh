@@ -6811,14 +6811,39 @@ if [[ "$VERBOSE" -eq 1 ]]; then set -x; fi
 if [[ "${AWG_FORCE_REINSTALL:-0}" == "1" ]]; then
     FORCE_REINSTALL=1
 fi
-if [[ "$FORCE_REINSTALL" -ne 1 ]] && [[ -f "$SERVER_CONF_FILE" ]] \
+# A resume after a reboot the installer asked for itself: --force runs step 1,
+# which reboots (state 2, after step 2 it is 3), and after the reboot the service
+# is up again. Without this exception a resume without the flag hit the guard,
+# exited 0 and left steps 2-7 undone. Only 2 and 3: a stuck 7 or 99, an empty or
+# damaged state file do not bypass the guard, or a live server would silently run
+# again.
+_resume_state=""
+[[ -f "$STATE_FILE" ]] && _resume_state=$(cat "$STATE_FILE" 2>/dev/null)
+if [[ "$FORCE_REINSTALL" -ne 1 ]] && [[ "$_resume_state" != 2 && "$_resume_state" != 3 ]] && [[ -f "$SERVER_CONF_FILE" ]] \
    && systemctl is-active --quiet awg-quick@awg0 2>/dev/null; then
     log_error "AmneziaWG is already installed and running."
-    log_error "To reinstall — pass --force (or AWG_FORCE_REINSTALL=1)."
-    log_error "WARNING: a reinstall will rerun Step 1 (sysctl/swap/BBR) and Step 7 (service restart)."
-    log_error "         Obfuscation parameters (Jc/Jmin/Jmax/H1-H4/I1) survive UNLESS you pass"
-    log_error "         --preset/--jc/--jmin/--jmax (those flags regenerate the whole set - every"
-    log_error "         issued client config would have to be reissued via regen)."
+    # What --force does depends on the state file: it is not reset, and
+    # initialize_setup carries on from the saved step; above step 4, settings
+    # (--port, --preset and others) roll it back to step 4. The general "a
+    # reinstall reruns steps 1 and 7" holds only without a state file.
+    if [[ "$_resume_state" =~ ^([1-7]|99)$ ]]; then
+        log_error "The previous run did not finish: $STATE_FILE holds step $_resume_state."
+        if [[ "$_resume_state" == 99 ]]; then
+            log_error "With --force (or AWG_FORCE_REINSTALL=1) only the finishing step runs, and with settings (--port, --preset and others) steps 4 onwards."
+        elif (( _resume_state > 4 )); then
+            log_error "With --force (or AWG_FORCE_REINSTALL=1) the install carries on from step $_resume_state, and with settings (--port, --preset and others) from step 4."
+        else
+            log_error "With --force (or AWG_FORCE_REINSTALL=1) the install carries on from step $_resume_state."
+        fi
+    elif [[ -n "$_resume_state" ]]; then
+        log_error "$STATE_FILE holds '${_resume_state:0:40}', a value the installer never writes: the file is damaged. Check it before running with --force."
+    else
+        log_error "To reinstall - pass --force (or AWG_FORCE_REINSTALL=1)."
+        log_error "WARNING: a reinstall will rerun Step 1 (sysctl/swap/BBR) and Step 7 (service restart)."
+    fi
+    log_error "Obfuscation parameters (Jc/Jmin/Jmax/H1-H4/I1) survive UNLESS you pass"
+    log_error "--preset/--jc/--jmin/--jmax (those flags regenerate the whole set - every"
+    log_error "issued client config would have to be reissued via regen); --no-cps removes I1."
     log_error "To manage clients:  sudo bash $MANAGE_SCRIPT_PATH help"
     log_error "To fully uninstall: sudo bash $0 --uninstall"
     exit 0
