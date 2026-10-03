@@ -180,34 +180,39 @@ _extract_logrotate() {
 
 # ---------- Phase 4: systemd unit + helper --systemd mode ----------
 
-@test "v5.12: helper case allows --hook|--systemd" {
+# Behaviour of every mode is covered in test_kmod_helper.bats (the helper is
+# run there whole, with stubs); the checks below pin the structure.
+_mode_body() { echo "$1" | awk -v f="^$2\\\\(\\\\) \\\\{\$" '$0 ~ f {p=1} p {print} p && /^}$/ {exit}'; }
+
+@test "v5.12: helper case allows every mode" {
     helper=$(_extract_helper "$BATS_TEST_DIRNAME/../install_amneziawg.sh")
-    [[ "$helper" == *'--hook|--systemd) ;;'* ]]
+    [[ "$helper" == *'--hook|--systemd|--repair|--prepare|--prepare-locked|--finish|--revert|--enable) ;;'* ]]
 }
 
-@test "v5.12: helper stamp fast-path gated on --hook only (boot must run full path)" {
+@test "v5.12: helper stamp fast-path lives in the --hook mode only (boot never skips)" {
     helper=$(_extract_helper "$BATS_TEST_DIRNAME/../install_amneziawg.sh")
-    # The fast-path guard explicitly checks MODE == "--hook" so --systemd skips it.
-    [[ "$helper" == *'[[ "$MODE" == "--hook" ]]'* ]]
+    hook=$(_mode_body "$helper" mode_hook); boot=$(_mode_body "$helper" mode_systemd)
+    [ -n "$hook" ]; [ -n "$boot" ]
+    [[ "$hook" == *'"$(cat "$STAMP_FILE" 2>/dev/null || true)" == "$state"'* ]]
+    [[ "$boot" != *STAMP_FILE* && "$boot" != *stamp_write* ]]
 }
 
-@test "v5.12: helper has --systemd modprobe + lsmod verify block" {
+# Loaded = /sys/module/amneziawg exists, not `lsmod | grep -q`: under pipefail
+# grep -q can SIGPIPE lsmod and turn a loaded module into a failure. The exit
+# codes of --systemd are covered by its behavioural tests.
+@test "v5.12: helper --systemd loads with modprobe and verifies through /sys/module" {
     helper=$(_extract_helper "$BATS_TEST_DIRNAME/../install_amneziawg.sh")
-    [[ "$helper" == *'if [[ "$MODE" == "--systemd" ]]'* ]]
-    [[ "$helper" == *'modprobe amneziawg'* ]]
-    [[ "$helper" == *"lsmod 2>/dev/null | grep -q '^amneziawg '"* ]]
+    boot=$(_mode_body "$helper" mode_systemd)
+    [[ "$boot" == *'modprobe amneziawg'* ]]
+    [[ "$boot" == *'[[ -d "${SYS_MODULE_DIR}/amneziawg" ]]'* ]]
+    [[ "$helper" != *'lsmod'*'grep -q'* ]]
 }
 
-@test "v5.12: helper --systemd path exits 1 on modprobe failure AND on lsmod miss" {
+@test "v5.12: the --hook mode never calls modprobe, dpkg or systemctl" {
     helper=$(_extract_helper "$BATS_TEST_DIRNAME/../install_amneziawg.sh")
-    # Both failure paths must exit 1 so systemd marks the unit failed.
-    # Pattern: ! modprobe ... ; (then) ... ; exit 1   AND   ! lsmod ... ; (then) ... ; exit 1
-    code=$(echo "$helper" | grep -vE '^[[:space:]]*#' || true)
-    # Count `exit 1` occurrences inside the --systemd block (between the
-    # `if [[ "$MODE" == "--systemd"` line and the closing `fi`). Both error
-    # branches must terminate with `exit 1`.
-    exit_count=$(echo "$code" | awk '/MODE.*== .--systemd./,/^fi$/' | grep -c '^[[:space:]]*exit 1')
-    [ "$exit_count" -ge 2 ]
+    hook=$(_mode_body "$helper" mode_hook | grep -vE '^[[:space:]]*#' || true)
+    [ -n "$hook" ]
+    [[ "$hook" != *modprobe* && "$hook" != *'dpkg '* && "$hook" != *systemctl* && "$hook" != *mode_finish* ]]
 }
 
 @test "v5.12: helper does NOT call apt-get / apt install (apt-hook deadlock guard)" {
