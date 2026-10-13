@@ -722,7 +722,7 @@ With `--yes` no question is asked and the behaviour stays as before, that is the
 <summary><strong>awgsetup_cfg.init (installation parameters)</strong></summary>
 
 ```bash
-# AmneziaWG 2.0 installation configuration (auto-generated)
+# AmneziaWG installation configuration (Auto-generated)
 export AWG_PORT=39743
 export AWG_TUNNEL_SUBNET='10.9.9.1/24'
 export DISABLE_IPV6=1
@@ -1104,7 +1104,7 @@ Client keys are stored in `/root/awg/keys/` (permissions 600). Server keys are i
 The installer downloads `awg_common_en.sh` and `manage_amneziawg_en.sh` (the Russian installer: `awg_common.sh` and `manage_amneziawg.sh`) from URLs pinned to the specific version tag:
 
 ```
-https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.37.1/awg_common_en.sh
+https://raw.githubusercontent.com/bivlked/amneziawg-installer/v6.0.0/awg_common_en.sh
 ```
 
 This provides **supply chain pinning**: downloaded scripts match the installer version, even if `main` has already been updated.

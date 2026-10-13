@@ -718,7 +718,7 @@ bash /root/awg/manage_amneziawg.sh regen
 <summary><strong>awgsetup_cfg.init (параметры установки)</strong></summary>
 
 ```bash
-# Конфигурация установки AmneziaWG 2.0 (Авто-генерация)
+# Конфигурация установки AmneziaWG (Авто-генерация)
 export AWG_PORT=39743
 export AWG_TUNNEL_SUBNET='10.9.9.1/24'
 export DISABLE_IPV6=1
@@ -1099,7 +1099,7 @@ graph TD
 Инсталлятор скачивает `awg_common.sh` и `manage_amneziawg.sh` с URL, привязанных к конкретному тегу версии:
 
 ```
-https://raw.githubusercontent.com/bivlked/amneziawg-installer/v5.37.1/awg_common.sh
+https://raw.githubusercontent.com/bivlked/amneziawg-installer/v6.0.0/awg_common.sh
 ```
 
 Это даёт **supply chain pinning**: скачиваемые скрипты соответствуют версии инсталлятора, даже если `main` уже обновлён.
