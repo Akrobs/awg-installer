@@ -106,7 +106,7 @@ CLI_PROTOCOL=""
 # our own test missed it because it passed a space, not an empty string.
 CLI_PROTOCOL_SET=0
 # Generation of a NEW install without the flag. Since v6.0.0 it is 3.1; on a
-# machine where 3.1 cannot run, the installer installs 2.0 by itself and says
+# machine where the installer does not set up 3.1, it installs 2.0 and says
 # so out loud (automatic fallback, see _awg31_resolve_protocol and
 # step3_check_module). The rule for reading the marker of an existing install
 # is separate and unchanged: no marker = 2.0.
@@ -534,7 +534,7 @@ apt_wait_for_ppa_package() {
 show_help() {
     cat << 'EOF'
 Usage: sudo bash install_amneziawg_en.sh [OPTIONS]
-Script for installation and configuration of AmneziaWG (generation 3.1 by default; 2.0 by flag or automatically where 3.1 cannot run) on Ubuntu (24.04 / 26.04) and Debian (12 / 13).
+Script for installation and configuration of AmneziaWG (generation 3.1 by default; 2.0 by flag or automatically where the installer does not set up 3.1) on Ubuntu (24.04 / 26.04) and Debian (12 / 13).
 
 Options:
   -h, --help            Show this help and exit
@@ -568,7 +568,7 @@ Options:
                         An explicit --port=N wins over port 443
   --protocol=2.0|3.1    Protocol generation for a new install or for one that
                         started but has not reached step 6 (default 3.1).
-                        Without the flag, on a machine where 3.1 cannot run
+                        Without the flag, where the installer does not set up 3.1
                         (kernel older than 6.7, a non-x86_64 architecture, ARM
                         included, a second-line kernel module or a failed module
                         check), 2.0 is installed with an explanation; if the
@@ -583,6 +583,7 @@ Options:
                         ends the install: the generation of a running install
                         changes only by reinstalling and reissuing every client
                         profile.
+                        The spaced form is accepted too: --protocol 2.0
   -y, --yes             Auto-confirm (reboots, UFW, etc.)
   -f, --force           Force reinstall on top of an already-running AmneziaWG
                         (by default a run on a configured server aborts;
@@ -1570,7 +1571,7 @@ _awg31_fallback_reason() {
 # same interactively and under --yes: it reports something forced, not a choice.
 _awg31_announce_fallback() {
     log_warn "=============================================================================="
-    log_warn "A new install defaults to AmneziaWG 3.1, but 3.1 cannot run on this machine:"
+    log_warn "A new install defaults to AmneziaWG 3.1, but the installer does not set up 3.1 on this machine:"
     log_warn "  $(_awg31_fallback_reason "${1-}") (reason code: ${1-})."
     log_warn "Installing AmneziaWG 2.0: second-line clients work with it, including routers whose firmware supports AmneziaWG 2.0."
     log_warn "To choose 2.0 deliberately and not see this message, run with --protocol=2.0."
@@ -4755,7 +4756,7 @@ create_diagnostic_report() {
     # and the 0644 window is genuinely reachable.
     _diag_umask=$(umask); umask 077
     {
-        echo "=== AMNEZIAWG 2.0 DIAGNOSTIC REPORT ==="
+        echo "=== AMNEZIAWG DIAGNOSTIC REPORT ==="
         echo ""
         echo "!!! WARNING: PrivateKey, PresharedKey and HeaderProtectionKey values are"
         echo "!!! stripped wherever they are labelled by name or by an awg show label."

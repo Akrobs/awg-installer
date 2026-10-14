@@ -1002,7 +1002,7 @@ Options:
   --mobile              Mobile setup in one flag: preset mobile + port 443/udp (an explicit --port wins)
   --protocol=2.0|3.1    Protocol generation for a new install or for one that
                         started but has not reached step 6 (default 3.1).
-                        Without the flag, on a machine where 3.1 cannot run
+                        Without the flag, where the installer does not set up 3.1
                         (kernel older than 6.7, a non-x86_64 architecture, ARM
                         included, a second-line kernel module or a failed module
                         check), 2.0 is installed with an explanation; if the
