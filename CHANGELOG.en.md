@@ -12,10 +12,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [6.1.0] - 2026-10-21
+
+**v6.1.0** - a `--i1` flag that sets the I1 concealment packet to your own value, the client table as of 21 October 2026, and a "how to install AmneziaWG 3.1" FAQ entry.
+
+### Added
+
+- **`--i1` flag: your own I1 concealment packet instead of a generated one** ([#196](https://github.com/bivlked/amneziawg-installer/issues/196)). For example `--i1='<b 0x...><r 16>'`. The value is checked right away, before any work: only the tags both the kernel module and amneziawg-go understand are accepted (`<b 0xHEX>`, `<r N>`, `<rc N>`, `<rd N>`, `<t>`, lengths 1 to 1000, the whole packet at most 1024 bytes), and `<c>` is refused with an explanation, because such a profile would not load on a phone. The value is pinned in `awgsetup_cfg.init`: a reinstall and the fallback to 2.0 keep it, `--no-cps` or an explicit `--preset`, `--mobile`, `--jc`, `--jmin`, `--jmax` drop it, and the installer says so. On a running server `--force --i1=...` changes only `I1` and leaves the rest of the set as it is; issued profiles get the new value after `regen`.
+
 ### Changed
 
 - **Client table as of 21 October 2026.** DefaultVPN is now marked as understanding 3.1 (since 2.0.1, per its App Store version history), KeeneticOS 5.2 Beta 1 (3.1 still only in the development channel), new versions WG Tunnel 5.8.2 and Desktop v2.4.1, FlClash v0.9.1, L×Box v2.25.16, AWG Manager v2.19.19 and awg-openwrt v25.12.6; the Throne padding fix is in 1.4.0-beta.3 too. Every changed row was rechecked against the project's code or page on the day of the edit.
 - **ADVANCED: a second reason not to enable `RandomTrailers`.** With the flag on and wide `H1`-`H3` ranges, some data packets can be taken for handshake packets and lost, depending on `S1`-`S4` and `H4` (6.7-7.3% on a synthetic set, the same on the kernel module and amneziawg-go); with the installer's 3.1 profile the share is negligible.
+- **README and INSTALL_VPS say 3.1 outright.** The install guide title names AmneziaWG 3.1, the README FAQ opens with "How do I install AmneziaWG 3.1 on my own server?", and the quick start warns that the reboot prompt needs a `y` (Enter cancels it).
 
 ## [6.0.1] - 2026-10-18
 
@@ -2132,7 +2141,8 @@ Major security and reliability update after several consecutive code audits. The
 - Diagnostic report (`--diagnostic`).
 - Full uninstall (`--uninstall`).
 
-[Unreleased]: https://github.com/bivlked/amneziawg-installer/compare/v6.0.1...HEAD
+[Unreleased]: https://github.com/bivlked/amneziawg-installer/compare/v6.1.0...HEAD
+[6.1.0]: https://github.com/bivlked/amneziawg-installer/compare/v6.0.1...v6.1.0
 [6.0.1]: https://github.com/bivlked/amneziawg-installer/compare/v6.0.0...v6.0.1
 [6.0.0]: https://github.com/bivlked/amneziawg-installer/compare/v5.37.1...v6.0.0
 [5.37.1]: https://github.com/bivlked/amneziawg-installer/compare/v5.37.0...v5.37.1
