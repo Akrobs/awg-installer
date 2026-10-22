@@ -12,6 +12,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [6.1.1] - 2026-10-22
+
+**v6.1.1** - step 2 now shows why it stopped: apt output in the install log, a server DNS check before blaming Launchpad, and git's own error when building the 2.0 module.
+
+### Fixed
+
+- **The reason an `apt install` failed in step 2 is now in the install log** ([#368](https://github.com/bivlked/amneziawg-installer/issues/368)). When the packages do not install, the last 40 lines of apt output and its exit code go to `install_amneziawg.log` instead of staying on screen only, so an attached log is enough to see what happened.
+- **The PPA unavailability message checks the server's DNS first.** When `amneziawg-dkms` does not show up in the package list, the installer first checks whether `ppa.launchpadcontent.net` and the distribution's main mirror resolve. If nothing resolves, it says plainly that DNS on the server itself is broken and suggests commands to check it; if only the PPA name fails, it says that too. The temporary Launchpad outage explanation stays when names do resolve, and also when apt goes through a proxy or DNS answers too slowly, since the name check proves nothing there ([#299](https://github.com/bivlked/amneziawg-installer/issues/299)).
+- **Building the 2.0 module from source shows git's answer and never waits for a password** ([D#255](https://github.com/bivlked/amneziawg-installer/discussions/255)). When cloning the module source fails, git's exit code and error lines reach the log and the screen, not just advice to check access to github.com. The login prompt is disabled: a public repository does not need it, and on a server nobody watches such a prompt would hang the install.
+
 ## [6.1.0] - 2026-10-21
 
 **v6.1.0** - a `--i1` flag that sets the I1 concealment packet to your own value, the client table as of 21 October 2026, and a "how to install AmneziaWG 3.1" FAQ entry.
@@ -2141,7 +2151,8 @@ Major security and reliability update after several consecutive code audits. The
 - Diagnostic report (`--diagnostic`).
 - Full uninstall (`--uninstall`).
 
-[Unreleased]: https://github.com/bivlked/amneziawg-installer/compare/v6.1.0...HEAD
+[Unreleased]: https://github.com/bivlked/amneziawg-installer/compare/v6.1.1...HEAD
+[6.1.1]: https://github.com/bivlked/amneziawg-installer/compare/v6.1.0...v6.1.1
 [6.1.0]: https://github.com/bivlked/amneziawg-installer/compare/v6.0.1...v6.1.0
 [6.0.1]: https://github.com/bivlked/amneziawg-installer/compare/v6.0.0...v6.0.1
 [6.0.0]: https://github.com/bivlked/amneziawg-installer/compare/v5.37.1...v6.0.0

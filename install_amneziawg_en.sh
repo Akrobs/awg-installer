@@ -8,8 +8,8 @@ fi
 # ==============================================================================
 # AmneziaWG 3.x (3.1 by default; 2.0 by flag and on kernels older than 6.7 and on ARM) installation and configuration script for Ubuntu/Debian servers
 # Author: @bivlked
-# Version: 6.1.0
-# Date: 2026-10-21
+# Version: 6.1.1
+# Date: 2026-10-22
 # Repository: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
@@ -40,7 +40,7 @@ _awg_ensure_sbin_path() {
 }
 _awg_ensure_sbin_path
 
-SCRIPT_VERSION="6.1.0"
+SCRIPT_VERSION="6.1.1"
 
 AWG_DIR="/root/awg"
 CONFIG_FILE="$AWG_DIR/awgsetup_cfg.init"
@@ -67,8 +67,8 @@ MANAGE_SCRIPT_PATH="$AWG_DIR/manage_amneziawg.sh"
 # Verified in step5_download_scripts() after curl.
 # Verification is skipped when AWG_BRANCH is overridden (test branch).
 # Format: sha256sum output (hex, 64 chars).
-COMMON_SCRIPT_SHA256="cd5149e9a12d034d4d22fdd66a1d3f702becbdde22413fc62b49f2df139be9ac"
-MANAGE_SCRIPT_SHA256="50e5a8b9d1d3dba57f8c8f2e0b7b55074b109687d7501ffef142de0a1362a7e1"
+COMMON_SCRIPT_SHA256="8fdbabf728bb962585996dbae72fafa5a0acec6e0ac2bc9f628db075f3f8235c"
+MANAGE_SCRIPT_SHA256="d952e30767e05ee861588d60f3dd1f45b216a26b2cd0f0f2ddbb006c3b49c197"
 
 # AmneziaWG 2.0 pin (H0, 31 jul 2026). Upstream merged AmneziaWG 3.0 into the
 # amneziawg-linux-kernel-module default branch, and the PPA switched to it. Back
@@ -608,6 +608,47 @@ apt_wait_for_ppa_package() {
         delay=$(( delay * 2 > 1800 ? 1800 : delay * 2 ))
     done
     return 1
+}
+
+# _ppa_dns_verdict : why the PPA package is not visible. Before blaming
+# Launchpad, check whether the server resolves names at all: with broken DNS apt
+# reaches no source, not just the PPA (I#299). Prints "dns-all <mirror>" (neither
+# the PPA name nor the main mirror resolves), "dns-ppa <mirror>" (only the PPA
+# name fails) or nothing: names resolve or the answer would be unreliable (an
+# apt proxy, a slow DNS, a failed check), and a Launchpad outage remains the guess.
+_ppa_dns_verdict() {
+    local mirror=archive.ubuntu.com dump
+    [[ "${OS_ID:-ubuntu}" == debian ]] && mirror=deb.debian.org
+    # Through a proxy apt does without the server's own DNS, so a DNS verdict
+    # would explain nothing. DIRECT and false set no proxy. The apt-config
+    # output goes through one awk, not a grep pipeline: under pipefail an early
+    # grep -q exit could flip the result via SIGPIPE.
+    [[ -n "${http_proxy:-}${https_proxy:-}${HTTP_PROXY:-}${HTTPS_PROXY:-}" ]] && return 0
+    dump="$(apt-config dump 2>/dev/null)"
+    awk '{ l = tolower($0) }
+         l ~ /^acquire::https?::proxy(-?auto-?detect)?(::[^ ]+)? "/ && l !~ / "(direct|false)?";$/ { f = 1 }
+         END { exit !f }' <<<"$dump" && return 0
+    # A verdict only on exit 2 (name not found, also when no DNS server
+    # answers). 124 means DNS gave no answer even in 60 s; other codes mean
+    # the check itself failed. In those cases the old explanation stays. Both
+    # names are asked at once, so the check takes a minute at most. ahosts, not
+    # hosts: hosts asks IPv6 and IPv4 in turn and waits twice as long. No
+    # trailing dot on the name: with it /etc/hosts is not read, while apt reads it.
+    # Measured with ahosts on Ubuntu 24.04 (22 oct 2026), silent servers in
+    # resolv.conf: 1 - 10 s, 2 - 20 s, 3 - 28 s; a search line doubles that
+    # (3 + search - 56 s); a silent upstream behind systemd-resolved - 20 s;
+    # connection refused - milliseconds.
+    local p_pid m_pid p_rc m_rc
+    timeout 60 getent ahosts ppa.launchpadcontent.net >/dev/null 2>&1 & p_pid=$!
+    timeout 60 getent ahosts "$mirror" >/dev/null 2>&1 & m_pid=$!
+    wait "$p_pid"; p_rc=$?
+    wait "$m_pid"; m_rc=$?
+    [[ "$p_rc" -eq 2 ]] || return 0
+    case "$m_rc" in
+        0) echo "dns-ppa $mirror" ;;
+        2) echo "dns-all $mirror" ;;
+    esac
+    return 0
 }
 
 # ==============================================================================
@@ -2142,7 +2183,25 @@ install_packages() {
         apt_update_tolerant || die "apt update error."
         _APT_UPDATED=1
     fi
-    if ! DEBIAN_FRONTEND=noninteractive apt install -y "${to_install[@]}"; then
+    # apt output is copied to a temp file: on failure its tail goes to the
+    # install log, otherwise the log holds only "Package installation error"
+    # and the cause (network, dependencies, dpkg) stays on screen (I#368). With
+    # output not going to a terminal apt prints a WARNING about its unstable
+    # CLI: Disable-Script-Warning drops it, otherwise every install shows it.
+    local _aout _arc
+    if _aout="$(mktemp 2>/dev/null)"; then
+        _install_temp_files+=("$_aout")
+    else
+        _aout=/dev/null
+    fi
+    DEBIAN_FRONTEND=noninteractive apt -o Apt::Cmd::Disable-Script-Warning=true install -y "${to_install[@]}" 2>&1 | tee "$_aout"
+    _arc=${PIPESTATUS[0]}
+    if [[ "$_arc" -ne 0 ]]; then
+        if [[ "$_aout" != /dev/null ]]; then
+            { echo "--- apt install (exit $_arc), last 40 lines of output ---"; tail -n 40 "$_aout"; } >> "$LOG_FILE" 2>/dev/null || true
+        else
+            log_warn "Could not create a temp file: the apt output did not reach the log, it is only on screen above."
+        fi
         # Fallback (only on the PPA/DKMS path of step 2, flag _AWG_KMOD_T1).
         # Enabled by FACT: the amneziawg-dkms package is in dpkg (unpacked or
         # half-configured), not "it was in the requested list" - configuring
@@ -6405,8 +6464,20 @@ _install_pinned_awg2_module() {
     work="$(mktemp -d /tmp/awg2-pin-XXXXXX)" || { log_error "mktemp -d failed."; return 1; }
 
     log "Cloning the pinned AmneziaWG 2.0 source ($AWG2_PIN_TAG)..."
-    if ! git clone --depth=1 --branch "$AWG2_PIN_TAG" "$repo" "$work/src" >/dev/null 2>&1; then
-        log_error "Failed to clone $repo (tag $AWG2_PIN_TAG). Check access to github.com."
+    # GIT_TERMINAL_PROMPT=0: a public repository needs no password, and a login
+    # prompt on /dev/tty on a server nobody watches hangs the install (D#255).
+    # GIT_ASKPASS=/bin/true closes an external prompt program too (GIT_ASKPASS,
+    # core.askPass): any prompt gets an empty answer at once. The git output is
+    # kept: git names the cause of the failure itself.
+    local _gout _gl _grc=0
+    _gout="$(GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true git clone --depth=1 --branch "$AWG2_PIN_TAG" "$repo" "$work/src" 2>&1 </dev/null)" || _grc=$?
+    if [[ "$_grc" -ne 0 ]]; then
+        log_error "Failed to clone $repo (tag $AWG2_PIN_TAG), git exited with ${_grc}. git said:"
+        [[ -n "${_gout//[[:space:]]/}" ]] || log_error "  git: no output"
+        while IFS= read -r _gl; do
+            [[ -n "$_gl" ]] && log_error "  git: $_gl"
+        done < <(printf '%s\n' "$_gout" | tail -n 10)
+        log_error "Check access to github.com."
         rm -rf "$work"; return 1
     fi
 
@@ -6733,6 +6804,21 @@ PPASRC
     # the install.
     if ! apt_wait_for_ppa_package amneziawg-dkms 3 30; then
         log_error "Package amneziawg-dkms did not appear in apt-cache after 3 attempts."
+        local _dns_v _dns_m
+        log "Checking whether the server resolves names (up to a minute)..."
+        read -r _dns_v _dns_m <<<"$(_ppa_dns_verdict)"
+        case "$_dns_v" in
+            dns-all)
+                log_error "The server cannot resolve either ppa.launchpadcontent.net or ${_dns_m}: DNS on the server itself is broken, Launchpad is not the cause."
+                log_error "Check: cat /etc/resolv.conf and getent hosts ${_dns_m}. Once names resolve, re-run the script with the same command."
+                die "DNS on the server does not work."
+                ;;
+            dns-ppa)
+                log_error "ppa.launchpadcontent.net does not resolve although ${_dns_m} does: the DNS server configured on this server does not return the PPA address."
+                log_error "Check: getent hosts ppa.launchpadcontent.net and cat /etc/resolv.conf; another DNS server usually helps. Then re-run the script with the same command."
+                die "The Amnezia PPA name does not resolve."
+                ;;
+        esac
         log_error "ppa.launchpadcontent.net appears to be down — this is a"
         log_error "Launchpad infrastructure outage, not a script bug."
         log_error "Wait 10–15 minutes and re-run the script with the same args."

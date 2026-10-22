@@ -8,8 +8,8 @@ fi
 # ==============================================================================
 # Скрипт для установки и настройки AmneziaWG 3.x (3.1 по умолчанию; 2.0 по флагу, а также на ядрах старее 6.7 и на ARM) на Ubuntu/Debian серверах
 # Автор: @bivlked
-# Версия: 6.1.0
-# Дата: 2026-10-21
+# Версия: 6.1.1
+# Дата: 2026-10-22
 # Репозиторий: https://github.com/bivlked/amneziawg-installer
 # ==============================================================================
 
@@ -39,7 +39,7 @@ _awg_ensure_sbin_path() {
 }
 _awg_ensure_sbin_path
 
-SCRIPT_VERSION="6.1.0"
+SCRIPT_VERSION="6.1.1"
 AWG_DIR="/root/awg"
 CONFIG_FILE="$AWG_DIR/awgsetup_cfg.init"
 STATE_FILE="$AWG_DIR/setup_state"
@@ -65,8 +65,8 @@ MANAGE_SCRIPT_PATH="$AWG_DIR/manage_amneziawg.sh"
 # Проверяются в step5_download_scripts() после curl.
 # Если AWG_BRANCH переопределён (не v$SCRIPT_VERSION), проверка пропускается.
 # Формат: sha256sum output (hex, 64 chars).
-COMMON_SCRIPT_SHA256="5a38f1e88b9257b9c0f720cace9b746a080b5b96c1f4afc590e29f786bf50381"
-MANAGE_SCRIPT_SHA256="1ad049ffc3e53cc1ea2f31fb44aa76ff44b049e07a205002851c1c38b988b057"
+COMMON_SCRIPT_SHA256="87e835bb4fc350a75de809f25d7bb7134a003b4f73f669714f8a53e9fd8ded5d"
+MANAGE_SCRIPT_SHA256="5cf1692e1c67ea0fe2fd585defc6b80aabe83b5bff7e5915981dfd002ea18eb1"
 
 # AmneziaWG 2.0 пин (H0, 31 jul 2026). Upstream влил AmneziaWG 3.0 в default-ветку
 # amneziawg-linux-kernel-module, и PPA переключился на 3.0. Тогда на ядрах старее
@@ -590,6 +590,46 @@ apt_wait_for_ppa_package() {
         delay=$(( delay * 2 > 1800 ? 1800 : delay * 2 ))
     done
     return 1
+}
+
+# _ppa_dns_verdict : почему пакет из PPA не виден. Прежде чем винить Launchpad,
+# проверяем, разрешает ли сервер имена: при сломанном DNS apt не достаёт ни одного
+# источника, а не только PPA (I#299). Печатает "dns-all <зеркало>" (не разрешается
+# ни имя PPA, ни основное зеркало), "dns-ppa <зеркало>" (не разрешается только имя
+# PPA) или ничего: имена разрешаются либо вывод был бы ненадёжен (прокси apt,
+# медленный DNS, сбой проверки), и остаётся версия о недоступности Launchpad.
+_ppa_dns_verdict() {
+    local mirror=archive.ubuntu.com dump
+    [[ "${OS_ID:-ubuntu}" == debian ]] && mirror=deb.debian.org
+    # Через прокси apt обходится без DNS самого сервера: вердикт про DNS тогда
+    # ничего не объясняет. Значения DIRECT и false прокси не задают. Вывод
+    # apt-config разбирается одним awk, а не конвейером grep: под pipefail
+    # ранний выход grep -q мог бы перевернуть результат через SIGPIPE.
+    [[ -n "${http_proxy:-}${https_proxy:-}${HTTP_PROXY:-}${HTTPS_PROXY:-}" ]] && return 0
+    dump="$(apt-config dump 2>/dev/null)"
+    awk '{ l = tolower($0) }
+         l ~ /^acquire::https?::proxy(-?auto-?detect)?(::[^ ]+)? "/ && l !~ / "(direct|false)?";$/ { f = 1 }
+         END { exit !f }' <<<"$dump" && return 0
+    # Вердикт только при коде 2 (имя не найдено, в том числе когда DNS не
+    # отвечает). 124 - DNS не ответил и за 60 с; прочие коды - сбой самой
+    # проверки. В этих случаях остаётся прежняя версия. Оба имени спрашиваются
+    # одновременно, поэтому проверка занимает не больше минуты. ahosts, а не
+    # hosts: hosts спрашивает IPv6 и IPv4 по очереди и ждёт вдвое дольше. Имя
+    # без точки на конце: с точкой не читается /etc/hosts, а apt его читает.
+    # Замер ahosts на Ubuntu 24.04 (22 oct 2026), молчащие серверы в resolv.conf:
+    # 1 - 10 с, 2 - 20 с, 3 - 28 с; строка search удваивает (3 + search - 56 с);
+    # молчащий вышестоящий за systemd-resolved - 20 с; отказ в соединении - мс.
+    local p_pid m_pid p_rc m_rc
+    timeout 60 getent ahosts ppa.launchpadcontent.net >/dev/null 2>&1 & p_pid=$!
+    timeout 60 getent ahosts "$mirror" >/dev/null 2>&1 & m_pid=$!
+    wait "$p_pid"; p_rc=$?
+    wait "$m_pid"; m_rc=$?
+    [[ "$p_rc" -eq 2 ]] || return 0
+    case "$m_rc" in
+        0) echo "dns-ppa $mirror" ;;
+        2) echo "dns-all $mirror" ;;
+    esac
+    return 0
 }
 
 # ==============================================================================
@@ -2077,7 +2117,25 @@ install_packages() {
         apt_update_tolerant || die "Ошибка apt update."
         _APT_UPDATED=1
     fi
-    if ! DEBIAN_FRONTEND=noninteractive apt install -y "${to_install[@]}"; then
+    # Вывод apt копируется во временный файл: при отказе его хвост уходит в
+    # журнал установки, иначе там остаётся одно «Ошибка установки пакетов», а
+    # причина (сеть, зависимости, dpkg) только на экране (I#368). Когда вывод
+    # идёт не в терминал, apt пишет WARNING про нестабильный CLI: опция
+    # Disable-Script-Warning его убирает, иначе он был бы на каждой установке.
+    local _aout _arc
+    if _aout="$(mktemp 2>/dev/null)"; then
+        _install_temp_files+=("$_aout")
+    else
+        _aout=/dev/null
+    fi
+    DEBIAN_FRONTEND=noninteractive apt -o Apt::Cmd::Disable-Script-Warning=true install -y "${to_install[@]}" 2>&1 | tee "$_aout"
+    _arc=${PIPESTATUS[0]}
+    if [[ "$_arc" -ne 0 ]]; then
+        if [[ "$_aout" != /dev/null ]]; then
+            { echo "--- apt install (код $_arc), последние 40 строк вывода ---"; tail -n 40 "$_aout"; } >> "$LOG_FILE" 2>/dev/null || true
+        else
+            log_warn "Не удалось создать временный файл: вывод apt в журнал не попал, он только на экране выше."
+        fi
         # Запасной путь (только на пути PPA/DKMS шага 2, флаг _AWG_KMOD_T1).
         # Включается по ФАКТУ: пакет amneziawg-dkms в dpkg есть (распакован или
         # недонастроен), а не «был в списке запрошенных» - донастройка может
@@ -6274,8 +6332,20 @@ _install_pinned_awg2_module() {
     work="$(mktemp -d /tmp/awg2-pin-XXXXXX)" || { log_error "mktemp -d не удался."; return 1; }
 
     log "Клонирование пинового исходника AmneziaWG 2.0 ($AWG2_PIN_TAG)..."
-    if ! git clone --depth=1 --branch "$AWG2_PIN_TAG" "$repo" "$work/src" >/dev/null 2>&1; then
-        log_error "Не удалось клонировать $repo (тег $AWG2_PIN_TAG). Проверьте доступ к github.com."
+    # GIT_TERMINAL_PROMPT=0: публичному репозиторию пароль не нужен, а запрос
+    # логина на /dev/tty на сервере без зрителя - это зависание установки
+    # (D#255). GIT_ASKPASS=/bin/true закрывает и внешнюю программу запроса
+    # (GIT_ASKPASS, core.askPass): на любой запрос сразу пустой ответ. Ответ
+    # git сохраняется: причину отказа он называет сам.
+    local _gout _gl _grc=0
+    _gout="$(GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true git clone --depth=1 --branch "$AWG2_PIN_TAG" "$repo" "$work/src" 2>&1 </dev/null)" || _grc=$?
+    if [[ "$_grc" -ne 0 ]]; then
+        log_error "Не удалось клонировать $repo (тег $AWG2_PIN_TAG), git вернул код ${_grc}. Ответ git:"
+        [[ -n "${_gout//[[:space:]]/}" ]] || log_error "  git: вывода нет"
+        while IFS= read -r _gl; do
+            [[ -n "$_gl" ]] && log_error "  git: $_gl"
+        done < <(printf '%s\n' "$_gout" | tail -n 10)
+        log_error "Проверьте доступ к github.com."
         rm -rf "$work"; return 1
     fi
 
@@ -6598,6 +6668,21 @@ PPASRC
     # валить установку.
     if ! apt_wait_for_ppa_package amneziawg-dkms 3 30; then
         log_error "Пакет amneziawg-dkms не появился в apt-cache после 3 попыток."
+        local _dns_v _dns_m
+        log "Проверяю, разрешает ли сервер имена (до минуты)..."
+        read -r _dns_v _dns_m <<<"$(_ppa_dns_verdict)"
+        case "$_dns_v" in
+            dns-all)
+                log_error "Сервер не может разрешить ни ppa.launchpadcontent.net, ни ${_dns_m}: не работает DNS на самом сервере, Launchpad тут ни при чём."
+                log_error "Проверьте: cat /etc/resolv.conf и getent hosts ${_dns_m}. Когда имена начнут разрешаться, запустите скрипт снова той же командой."
+                die "DNS на сервере не работает."
+                ;;
+            dns-ppa)
+                log_error "Имя ppa.launchpadcontent.net не разрешается, хотя ${_dns_m} разрешается: DNS-сервер, который указан у сервера, не отдаёт адрес PPA."
+                log_error "Проверьте: getent hosts ppa.launchpadcontent.net и cat /etc/resolv.conf; помогает другой DNS-сервер. Затем запустите скрипт снова той же командой."
+                die "Имя PPA Amnezia не разрешается."
+                ;;
+        esac
         log_error "Похоже, ppa.launchpadcontent.net сейчас недоступен — это outage"
         log_error "инфраструктуры Launchpad, не баг скрипта."
         log_error "Подождите 10–15 минут и запустите скрипт снова той же командой."
